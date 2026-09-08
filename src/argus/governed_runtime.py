@@ -25,16 +25,13 @@ from argus.attempts import (
 )
 from argus.budgets import (
     BudgetDecisionKind,
+    BudgetExhaustedError,
     BudgetPolicy,
     BudgetStore,
     SpendReservation,
 )
 from argus.effect_attempts import EffectAttemptStore, EffectReplayPolicy
-from argus.effect_runtime import (
-    EffectExecutor,
-    EffectRuntime,
-    EffectRuntimeResult,
-)
+from argus.effect_runtime import EffectExecutor, EffectRuntime, EffectRuntimeResult
 from argus.effects import AmbiguousEffectError, EffectState, EffectStore
 from argus.guardrails import GateDecision, GuardrailStore
 from argus.model import ArgusStateError
@@ -87,12 +84,7 @@ class ExecutionGateEvent:
 
 
 class GovernedRuntime:
-    """Compose Phase 4 controls/budgets with Phase 2 worker and Phase 3 effect paths.
-
-    The lower-level runtimes remain reusable recovery primitives. Continuous
-    unattended consumers should enter execution through this class so pause/kill
-    and budget decisions happen before durable attempt allocation or external calls.
-    """
+    """Compose Phase 4 controls/budgets with Phase 2 worker and Phase 3 effect paths."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
@@ -110,7 +102,6 @@ class GovernedRuntime:
     ) -> AttemptDecision:
         instant = canonical_due_at(now or datetime.now(timezone.utc))
 
-        # Preflight the Phase 2 recovery boundary before reserving new capacity.
         due = {
             (item.mission_id, item.step_id)
             for item in Phase2Runtime(self.path).due(instant)
@@ -121,6 +112,8 @@ class GovernedRuntime:
             raise AttemptNotDueError(
                 f"step {mission_id}/{step_id} is not durably eligible at {instant}"
             )
+
+        # Resolve Phase 2 ambiguity before allocating any new spend reservation.
         with AttemptStore(self.path) as attempts:
             latest = attempts.latest_attempt(mission_id, step_id)
             if latest is not None and latest.state is AttemptState.STARTED:
@@ -139,8 +132,6 @@ class GovernedRuntime:
             reserve_spend_usd=reserve_spend_usd,
         )
 
-        # If anything after authorization crashes, the reservation remains durable.
-        # Phase 2 STARTED-attempt ambiguity still blocks replay independently.
         decision = Phase2Runtime(self.path).execute_due_step(
             mission_id,
             step_id,
@@ -268,20 +259,18 @@ class GovernedRuntime:
         with GuardrailStore(self.path) as guardrails:
             guardrail_record = guardrails.load(mission_id)
             gate = guardrails.check_gate(mission_id)
+
         with BudgetStore(self.path) as budgets:
             budget_policy = budgets.load_policy(mission_id)
 
             if gate.decision is GateDecision.DENY:
-                self._record_gate(
+                self._deny(
                     mission_id,
                     kind,
-                    "deny",
                     gate.reason.value,
                     guardrail_record.policy.policy_hash,
                     budget_policy.policy_hash,
-                    None,
                 )
-                raise ExecutionGateDenied(gate.reason.value)
 
             attempt_decision = (
                 budgets.check_worker_attempt(mission_id)
@@ -289,42 +278,29 @@ class GovernedRuntime:
                 else budgets.check_effect_attempt(mission_id)
             )
             if attempt_decision.kind is BudgetDecisionKind.DENY:
-                self._record_gate(
+                self._deny(
                     mission_id,
                     kind,
-                    "deny",
                     attempt_decision.reason.value,
                     guardrail_record.policy.policy_hash,
                     budget_policy.policy_hash,
-                    None,
                 )
-                raise ExecutionGateDenied(attempt_decision.reason.value)
 
             reservation: SpendReservation | None = None
             if budget_policy.spend_limit_usd is not None:
                 if reserve_spend_usd is None:
-                    self._record_gate(
+                    self._deny(
                         mission_id,
                         kind,
-                        "deny",
                         "spend_reservation_required",
                         guardrail_record.policy.policy_hash,
                         budget_policy.policy_hash,
-                        None,
                     )
-                    raise ExecutionGateDenied("spend_reservation_required")
-                spend_decision = budgets.check_spend(mission_id, reserve_spend_usd)
-                if spend_decision.kind is BudgetDecisionKind.DENY:
-                    self._record_gate(
-                        mission_id,
-                        kind,
-                        "deny",
-                        spend_decision.reason.value,
-                        guardrail_record.policy.policy_hash,
-                        budget_policy.policy_hash,
-                        None,
-                    )
-                    raise ExecutionGateDenied(spend_decision.reason.value)
+
+                # Derive the next call identity from authoritative attempt evidence.
+                # Crucially, call reserve_spend directly: it resolves an existing
+                # same-key reservation idempotently *before* testing fresh capacity.
+                # This is what makes crash-after-reservation restart safe.
                 snapshot = budgets.snapshot(mission_id)
                 next_no = (
                     snapshot.worker_attempts_used + 1
@@ -334,11 +310,20 @@ class GovernedRuntime:
                 reservation_key = (
                     f"argus:spend:{kind.value}:{mission_id}:{subject_key}:attempt:{next_no}"
                 )
-                reservation = budgets.reserve_spend(
-                    mission_id,
-                    reservation_key,
-                    reserve_spend_usd,
-                )
+                try:
+                    reservation = budgets.reserve_spend(
+                        mission_id,
+                        reservation_key,
+                        reserve_spend_usd,
+                    )
+                except BudgetExhaustedError:
+                    self._deny(
+                        mission_id,
+                        kind,
+                        "spend_exhausted",
+                        guardrail_record.policy.policy_hash,
+                        budget_policy.policy_hash,
+                    )
 
         self._record_gate(
             mission_id,
@@ -357,6 +342,25 @@ class GovernedRuntime:
             reservation=reservation,
         )
 
+    def _deny(
+        self,
+        mission_id: str,
+        kind: ExecutionKind,
+        reason: str,
+        guardrail_policy_hash: str,
+        budget_policy_hash: str,
+    ) -> None:
+        self._record_gate(
+            mission_id,
+            kind,
+            "deny",
+            reason,
+            guardrail_policy_hash,
+            budget_policy_hash,
+            None,
+        )
+        raise ExecutionGateDenied(reason)
+
     def _settle_worker_reservation(
         self,
         authorization: ExecutionAuthorization,
@@ -367,7 +371,6 @@ class GovernedRuntime:
             return
         actual = decision.attempt.cost_usd
         if actual is None:
-            # Unknown spend remains reserved. Do not optimistically release capacity.
             return
         with BudgetStore(self.path) as budgets:
             budgets.commit_spend(reservation.reservation_key, actual)
