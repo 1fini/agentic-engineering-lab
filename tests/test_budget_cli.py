@@ -48,8 +48,8 @@ def test_budget_init_and_status_are_machine_readable(tmp_path, capsys) -> None:
     initialized = json.loads(capsys.readouterr().out)
     assert initialized["budget"]["worker_attempt_limit"] == 3
     assert initialized["budget"]["effect_attempt_limit"] == 2
-    assert initialized["budget"]["spend_limit_usd"] == "10.50"
-    assert initialized["budget"]["spend_available_usd"] == "10.50"
+    assert initialized["budget"]["spend_limit_usd"] == "10.5"
+    assert initialized["budget"]["spend_available_usd"] == "10.5"
     assert initialized["policy_hash"].startswith("argus:budget:v1:")
 
     assert main(["status", "--store", str(path), "mission-1"]) == 0
