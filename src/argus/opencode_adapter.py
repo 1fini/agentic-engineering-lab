@@ -6,7 +6,6 @@ OpenCode is an execution backend only. ARGUS remains the orchestration authority
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 import tempfile
 from typing import Mapping
@@ -30,6 +29,19 @@ Return exactly one JSON object on stdout and no Markdown/code fences. The object
 Do not invent a different schema. If the operation cannot be completed safely, use retryable_failure or permanent_failure explicitly.
 """
 
+_PROTECTED_EXTRA_ARGS = {
+    "--format",
+    "--file",
+    "-f",
+    "--model",
+    "-m",
+    "--agent",
+    "--variant",
+    "--dir",
+    "--attach",
+    "--thinking",
+}
+
 
 @dataclass(frozen=True)
 class OpenCodeConfig:
@@ -47,14 +59,20 @@ class OpenCodeConfig:
     env: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
-        if not self.model:
+        if not self.model or not self.model.strip():
             raise ValueError("OpenCode model must be explicit for bounded non-interactive execution")
-        if not self.executable:
+        if not self.executable or not self.executable.strip():
             raise ValueError("OpenCode executable must be non-empty")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be > 0")
         if self.working_directory is not None and not self.working_directory:
             raise ValueError("working_directory must be non-empty when provided")
+        protected = [arg for arg in self.extra_args if arg in _PROTECTED_EXTRA_ARGS]
+        if protected:
+            raise ValueError(
+                "OpenCode extra_args cannot override protocol-critical flags: "
+                + ", ".join(protected)
+            )
 
 
 class OpenCodeWorkerAdapter:
