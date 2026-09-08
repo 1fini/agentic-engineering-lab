@@ -9,6 +9,7 @@ from typing import Any
 
 from argus import __version__
 from argus.attempts import AttemptStore
+from argus.budgets import BudgetPolicy, BudgetStore
 from argus.effect_attempts import EffectAttemptStore
 from argus.effects import EffectStore
 from argus.fixture_workers import build_fixture_registry
@@ -94,6 +95,16 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--workload-scope")
     kill_parser.add_argument("action", choices=("on", "off"))
 
+    budget_parser = subparsers.add_parser(
+        "budget-init", help="attach a versioned generic budget policy to a mission"
+    )
+    budget_parser.add_argument("--store", required=True, help="path to ARGUS SQLite state")
+    budget_parser.add_argument("--policy-version", type=int, default=1)
+    budget_parser.add_argument("--worker-attempt-limit", type=int)
+    budget_parser.add_argument("--effect-attempt-limit", type=int)
+    budget_parser.add_argument("--spend-limit-usd")
+    budget_parser.add_argument("mission_id")
+
     return parser
 
 
@@ -121,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
             return _control(args)
         if args.command == "kill-switch":
             return _kill_switch(args)
+        if args.command == "budget-init":
+            return _budget_init(args)
         raise AssertionError(f"unhandled command: {args.command}")
     except ManifestError as exc:
         return _emit_error(_EXIT_INPUT, "input_error", exc)
@@ -194,6 +207,13 @@ def _status(args: argparse.Namespace) -> int:
                 "gate_decision": gate.decision.value,
                 "gate_reason": gate.reason.value,
             }
+    with BudgetStore(args.store) as budgets:
+        budget_policy = budgets.get_policy(args.mission_id)
+        if budget_policy is None:
+            budget_status = None
+        else:
+            snapshot = budgets.snapshot(args.mission_id)
+            budget_status = _budget_snapshot_dict(snapshot)
     _emit(
         {
             "schema_version": 1,
@@ -201,6 +221,7 @@ def _status(args: argparse.Namespace) -> int:
             "mission_id": mission.mission_id,
             "state": mission.state.value,
             "guardrail": guardrail_status,
+            "budget": budget_status,
             "steps": [
                 {
                     "step_id": step.envelope.step_id,
@@ -301,6 +322,16 @@ def _inspect(args: argparse.Namespace) -> int:
                     and event.event_type.startswith("workload_kill_")
                 )
             ]
+    with BudgetStore(args.store) as budgets:
+        budget_policy = budgets.get_policy(args.mission_id)
+        if budget_policy is None:
+            budget_status = None
+            reservations = []
+            budget_history = []
+        else:
+            budget_status = _budget_snapshot_dict(budgets.snapshot(args.mission_id))
+            reservations = budgets.list_reservations(args.mission_id)
+            budget_history = budgets.history(args.mission_id)
     _emit(
         {
             "schema_version": 1,
@@ -308,6 +339,7 @@ def _inspect(args: argparse.Namespace) -> int:
             "mission_id": mission.mission_id,
             "state": mission.state.value,
             "guardrail": guardrail_status,
+            "budget": budget_status,
             "steps": [
                 {
                     "step_id": step.envelope.step_id,
@@ -429,6 +461,36 @@ def _inspect(args: argparse.Namespace) -> int:
                 }
                 for event in guardrail_history
             ],
+            "spend_reservations": [
+                {
+                    "reservation_key": reservation.reservation_key,
+                    "state": reservation.state.value,
+                    "reserved_usd": str(reservation.reserved_usd),
+                    "committed_usd": (
+                        str(reservation.committed_usd)
+                        if reservation.committed_usd is not None
+                        else None
+                    ),
+                    "policy_version": reservation.policy_version,
+                    "policy_hash": reservation.policy_hash,
+                    "created_at": reservation.created_at,
+                    "updated_at": reservation.updated_at,
+                }
+                for reservation in reservations
+            ],
+            "budget_history": [
+                {
+                    "sequence": event.sequence,
+                    "event_type": event.event_type,
+                    "reservation_key": event.reservation_key,
+                    "amount_usd": str(event.amount_usd) if event.amount_usd is not None else None,
+                    "reason": event.reason,
+                    "policy_version": event.policy_version,
+                    "policy_hash": event.policy_hash,
+                    "recorded_at": event.recorded_at,
+                }
+                for event in budget_history
+            ],
         }
     )
     return 0
@@ -546,6 +608,53 @@ def _kill_switch(args: argparse.Namespace) -> int:
         }
     )
     return 0
+
+
+def _budget_init(args: argparse.Namespace) -> int:
+    policy = BudgetPolicy(
+        mission_id=args.mission_id,
+        policy_version=args.policy_version,
+        worker_attempt_limit=args.worker_attempt_limit,
+        effect_attempt_limit=args.effect_attempt_limit,
+        spend_limit_usd=args.spend_limit_usd,
+    )
+    with BudgetStore(args.store) as budgets:
+        persisted = budgets.set_policy(policy)
+        snapshot = budgets.snapshot(args.mission_id)
+    _emit(
+        {
+            "schema_version": 1,
+            "command": "budget-init",
+            "mission_id": args.mission_id,
+            "policy_version": persisted.policy_version,
+            "policy_hash": persisted.policy_hash,
+            "budget": _budget_snapshot_dict(snapshot),
+        }
+    )
+    return 0
+
+
+def _budget_snapshot_dict(snapshot: Any) -> dict[str, Any]:
+    return {
+        "policy_version": snapshot.policy.policy_version,
+        "policy_hash": snapshot.policy.policy_hash,
+        "worker_attempt_limit": snapshot.policy.worker_attempt_limit,
+        "worker_attempts_used": snapshot.worker_attempts_used,
+        "effect_attempt_limit": snapshot.policy.effect_attempt_limit,
+        "effect_attempts_used": snapshot.effect_attempts_used,
+        "spend_limit_usd": (
+            str(snapshot.policy.spend_limit_usd)
+            if snapshot.policy.spend_limit_usd is not None
+            else None
+        ),
+        "spend_committed_usd": str(snapshot.spend_committed_usd),
+        "spend_reserved_usd": str(snapshot.spend_reserved_usd),
+        "spend_available_usd": (
+            str(snapshot.spend_available_usd)
+            if snapshot.spend_available_usd is not None
+            else None
+        ),
+    }
 
 
 def _emit(payload: dict[str, Any]) -> None:
