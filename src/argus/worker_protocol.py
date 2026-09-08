@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 import json
+import math
 from typing import Any, Mapping
 
 WORKER_PROTOCOL_VERSION = 1
@@ -35,9 +36,9 @@ class WorkerUsage:
                 raise WorkerProtocolError(f"{name} must be a non-negative integer")
         if self.cost_usd is not None:
             if isinstance(self.cost_usd, bool) or not isinstance(self.cost_usd, (int, float)):
-                raise WorkerProtocolError("cost_usd must be a non-negative number")
-            if self.cost_usd < 0:
-                raise WorkerProtocolError("cost_usd must be a non-negative number")
+                raise WorkerProtocolError("cost_usd must be a finite non-negative number")
+            if not math.isfinite(float(self.cost_usd)) or self.cost_usd < 0:
+                raise WorkerProtocolError("cost_usd must be a finite non-negative number")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -103,9 +104,13 @@ class WorkerResponse:
             if isinstance(self.retry_after_seconds, bool) or not isinstance(
                 self.retry_after_seconds, (int, float)
             ):
-                raise WorkerProtocolError("retry_after_seconds must be a non-negative number")
-            if self.retry_after_seconds < 0:
-                raise WorkerProtocolError("retry_after_seconds must be a non-negative number")
+                raise WorkerProtocolError(
+                    "retry_after_seconds must be a finite non-negative number"
+                )
+            if not math.isfinite(float(self.retry_after_seconds)) or self.retry_after_seconds < 0:
+                raise WorkerProtocolError(
+                    "retry_after_seconds must be a finite non-negative number"
+                )
             if self.outcome is not WorkerOutcome.RETRYABLE_FAILURE:
                 raise WorkerProtocolError(
                     "retry_after_seconds is valid only for retryable_failure"
@@ -138,7 +143,7 @@ def parse_worker_response(raw: str | bytes, *, expected_request_id: str) -> Work
         raise WorkerProtocolError("worker response must be str or bytes")
 
     try:
-        value = json.loads(text)
+        value = json.loads(text, parse_constant=_reject_non_finite_json)
     except json.JSONDecodeError as exc:
         raise WorkerProtocolError("worker response is not valid JSON") from exc
     if not isinstance(value, dict):
@@ -207,6 +212,16 @@ def parse_worker_response(raw: str | bytes, *, expected_request_id: str) -> Work
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
     try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
     except (TypeError, ValueError) as exc:
-        raise WorkerProtocolError("worker payload must be JSON-serializable") from exc
+        raise WorkerProtocolError("worker payload must be strict JSON-serializable") from exc
+
+
+def _reject_non_finite_json(value: str):
+    raise WorkerProtocolError(f"worker response contains non-finite JSON number: {value}")
