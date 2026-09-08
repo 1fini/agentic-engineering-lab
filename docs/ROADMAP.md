@@ -1,8 +1,6 @@
 # ARGUS Roadmap
 
-This roadmap is intentionally capability-driven rather than feature-maximalist.
-
-ARGUS should grow only when a real workload demonstrates a generic execution need.
+This roadmap is capability-driven rather than feature-maximalist. ARGUS grows only when a real workload demonstrates a reusable execution need.
 
 ## Phase 0 — Foundation — COMPLETE
 
@@ -12,7 +10,6 @@ Goal: establish the public project, architecture boundary, and first reference w
 - [x] ARGUS codename and runtime role defined.
 - [x] DAL / ARGUS ownership boundary documented.
 - [x] First reference workload documented.
-- [x] Initial implementation issue created from the current DAL integration need.
 - [x] Initial technology choices recorded as ADRs.
 
 Exit criterion: contributors can explain what belongs in ARGUS and what does not.
@@ -23,64 +20,62 @@ Delivered by Mission #1.
 
 Goal: make one long-running mission survive process restarts without repeating completed work.
 
-Delivered capabilities:
-
 - [x] durable SQLite mission store;
-- [x] durable ordered step journal;
+- [x] ordered durable step journal;
 - [x] transactional state transitions and audit entries;
 - [x] versioned generic step contracts;
 - [x] typed step results;
-- [x] machine-readable CLI for `run`, `status`, and `inspect`;
 - [x] deterministic idempotency keys;
+- [x] machine-readable `run`, `status`, `inspect`;
 - [x] restart recovery that skips durably completed steps;
-- [x] fail-closed behavior for work left `RUNNING` after process death;
-- [x] focused subprocess failure-injection tests;
+- [x] fail-closed behavior for ambiguous `RUNNING` work;
+- [x] real subprocess failure-injection tests;
 - [x] generic reference-workload fixture with no consumer business semantics.
 
-Explicitly out of scope and still not implemented:
+Exit criterion: a real consumer-shaped fixture can kill ARGUS mid-run, restart it, and continue without rerunning an already committed step.
 
-- distributed execution;
-- multi-node coordination;
-- generic workflow DSL;
-- dynamic agent swarms;
-- web dashboard;
-- automatic replay of ambiguous `RUNNING` work.
+## Phase 2 — Durable Scheduling & Bounded Workers — COMPLETE
 
-Exit criterion: a real consumer-shaped fixture can execute a multi-step mission, kill ARGUS mid-run, restart it, and continue without rerunning an already committed step. The Phase 1 acceptance suite proves this at real subprocess boundaries.
+Delivered by Mission #10.
 
-## Phase 2 — Waiting, Scheduling, and Bounded Workers — NEXT
+Goal: support missions that alternate between future wakeups and bounded external worker execution while preserving deterministic retry and restart semantics.
 
-Goal: support missions that alternate between active work and future wakeups.
+- [x] durable UTC `due_at` scheduling;
+- [x] dependency-aware local due poller;
+- [x] restart-safe due discovery;
+- [x] duplicate read-only polling without duplicate attempts;
+- [x] strict versioned worker request/response protocol;
+- [x] generic bounded subprocess transport;
+- [x] OpenCode-compatible adapter isolated from control flow;
+- [x] structured output validation;
+- [x] process-tree timeout handling;
+- [x] retryable / permanent / timeout / malformed classification;
+- [x] durable attempt records created before worker invocation;
+- [x] deterministic attempt limits and retry timing;
+- [x] duration, exit code, token and optional cost accounting;
+- [x] fail-closed replay blocking for ambiguous `STARTED` attempts;
+- [x] integrated `Phase2Runtime` composing scheduler + attempts + workers;
+- [x] safe mission completion reconciliation after a final committed step;
+- [x] real subprocess acceptance for restart, retry, timeout, malformed output, permanent failure and process death;
+- [x] generic DAL-shaped fixture remains domain-opaque.
 
-Candidate capabilities:
+Exit criterion: a consumer can persist future work, restart the runtime, wake only at the due boundary, execute a bounded worker, classify failures, retry according to deterministic policy, and inspect durable attempt evidence. Ambiguous executions remain blocked rather than blindly replayed.
 
-- durable `due_at` scheduling;
-- waiting state;
-- local scheduler loop;
-- OpenCode worker adapter;
-- structured-output schema validation;
-- process-tree timeout;
-- retryable / permanent error classification;
-- attempt limits;
-- basic duration and cost accounting.
-
-Exit criterion: a consumer can persist a future wakeup, restart the runtime, and receive the step when it becomes due; worker failures are classified rather than treated as opaque crashes.
-
-## Phase 3 — Side-Effect Safety and Recovery
+## Phase 3 — Side-Effect Safety and Recovery — NEXT
 
 Goal: safely orchestrate external operations whose outcome may be ambiguous after failure.
 
-Candidate capabilities:
+Candidate capabilities, added only when exercised by the reference workload:
 
 - durable side-effect intent;
 - execution receipt contract;
-- `UNKNOWN_EFFECT` state;
-- generic reconciliation hook;
+- explicit `UNKNOWN_EFFECT` / reconciliation state or protocol;
+- generic consumer-owned reconciliation hook;
 - duplicate-effect prevention;
 - correlation and artifact lineage;
-- crash-boundary test harness.
+- crash-boundary acceptance harness covering intent / call / receipt / reconciliation boundaries.
 
-Exit criterion: a consumer can prove that a crash at each relevant boundary cannot cause an unexamined duplicate external effect.
+Exit criterion: a consumer can prove that a crash at each relevant external-effect boundary cannot cause an unexamined duplicate effect.
 
 ## Phase 4 — Operational Guardrails
 
@@ -90,7 +85,7 @@ Candidate capabilities:
 
 - mission budgets;
 - attempt budgets;
-- cost budgets when observable;
+- spend budgets when observable;
 - pause / resume;
 - cancellation;
 - workload kill switch;
@@ -102,14 +97,14 @@ Exit criterion: operators can bound and stop autonomous execution deterministica
 
 ## Phase 5 — Remote Always-On Runtime
 
-Goal: move durability away from the operator laptop while preserving the same mission semantics.
+Goal: move durability away from the operator laptop while preserving mission semantics.
 
 Candidate capabilities:
 
 - daemon / service mode;
 - remote CLI transport;
 - secure runtime configuration;
-- worker backend abstraction;
+- worker backend configuration;
 - health and liveness reporting;
 - deployment documentation;
 - backup / restore of runtime state.
@@ -135,7 +130,7 @@ None of these should be implemented only because they are common in workflow eng
 
 ## Decision rule
 
-Before promoting an item onto the active roadmap, answer three questions:
+Before promoting an item onto the active roadmap, answer:
 
 1. Which real workload needs it now?
 2. Why cannot that concern remain inside the consumer?
