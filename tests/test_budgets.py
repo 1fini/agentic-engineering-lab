@@ -18,6 +18,7 @@ from argus.budgets import (
 from argus.effect_attempts import EffectAttemptStore
 from argus.effects import EffectIntent, EffectStore
 from argus.model import StepEnvelope
+from argus.scheduler import DurableScheduler
 from argus.store import SqliteMissionStore
 
 
@@ -85,6 +86,9 @@ def test_worker_attempt_budget_counts_authoritative_attempt_rows(tmp_path) -> No
         assert before.kind is BudgetDecisionKind.ALLOW
         assert before.used == 0
 
+    # Phase 2 attempts require the durable scheduler extension to be initialized.
+    with DurableScheduler(path):
+        pass
     with AttemptStore(path) as attempts:
         attempts.begin_attempt(
             "mission-1",
