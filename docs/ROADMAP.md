@@ -84,31 +84,62 @@ Goal: safely orchestrate external operations whose outcome may be ambiguous afte
 
 Exit criterion: a consumer can prove that crashes before call, after remote acceptance/before local receipt, during reconciliation, and after receipt commit cannot cause an unexamined duplicate effect. Confirmed applied forbids replay; confirmed not applied may authorize a bounded re-attempt; unknown remains fail-closed.
 
-## Phase 4 — Operational Guardrails — NEXT
+## Phase 4 — Operational Guardrails & Execution Gates — COMPLETE
+
+Delivered by Mission #30.
 
 Goal: make continuous autonomy governable without relying on model cooperation.
 
-Candidate capabilities, added only when exercised by the reference workload:
+- [x] versioned durable mission guardrail policy with policy hash/provenance;
+- [x] durable `ACTIVE / PAUSED / CANCELLED` control state;
+- [x] terminal cancellation;
+- [x] durable workload-scoped kill switch;
+- [x] durable global kill switch;
+- [x] deterministic control gate precedence;
+- [x] worker-attempt budget derived from authoritative Phase 2 attempt evidence;
+- [x] effect-attempt budget derived from authoritative Phase 3 attempt evidence;
+- [x] optional spend/cost budget;
+- [x] crash-safe `RESERVED -> COMMITTED | RELEASED` spend ledger;
+- [x] outstanding reservations count against available capacity across restart;
+- [x] no automatic release of ambiguous reservations;
+- [x] deterministic reservation identity for the next worker/effect attempt;
+- [x] restart-safe idempotent reservation reuse after crash-before-attempt;
+- [x] `GovernedRuntime` as the authoritative continuous unattended execution surface;
+- [x] control/budget gates before Phase 2 worker allocation;
+- [x] control/budget gates before Phase 3 effect allocation and re-attempt;
+- [x] trusted worker cost settlement and generic effect cost resolver boundary;
+- [x] structured governed execution audit with guardrail + budget policy hashes;
+- [x] machine-readable guardrail, budget, reservation, and policy evidence;
+- [x] real subprocess acceptance for pause/resume/cancel and kill switches across restart;
+- [x] real subprocess acceptance for worker/effect attempt exhaustion before invocation;
+- [x] real `os._exit()` acceptance around spend reservation -> attempt -> worker boundaries;
+- [x] real `os._exit()` acceptance around spend reservation -> effect -> remote acceptance -> reconciliation boundaries;
+- [x] generic DAL-shaped governance fixture remains domain-opaque.
 
-- durable mission execution budget;
-- durable worker/effect attempt budgets;
-- spend/cost budget with explicit reservations when observable;
-- pause / resume;
-- cancellation;
-- workload kill switch;
-- global kill switch;
-- policy versioning;
-- structured audit events for allow/deny/halt decisions;
-- deterministic gates before worker invocation and external-effect execution;
-- crash-boundary acceptance around budget reservation/commit and operator-state transitions.
+The final acceptance caught and fixed a real crash-recovery bug: restart after reservation/before attempt originally performed a fresh spend check and could deny itself because its own durable reservation already consumed capacity. The delivered runtime resolves the deterministic reservation identity first and reuses the same reservation idempotently.
 
-Exit criterion: operators can bound, pause, resume, cancel, and stop autonomous execution deterministically, and no worker/effect call can cross a durable paused/cancelled/killed or exhausted-budget boundary.
+Exit criterion: operators can bound, pause, resume, cancel, and stop autonomous execution deterministically, and no governed worker/effect call can cross a durable paused/cancelled/killed or exhausted-budget boundary. Crash/restart cannot silently duplicate reservations or bypass Phase 2/3 ambiguity handling.
 
-## Phase 5 — Remote Always-On Runtime
+## Reference-workload integration — ACTIVE PRODUCT MILESTONE
 
-Goal: move durability away from the operator laptop while preserving mission semantics.
+Before expanding the generic runtime merely because another platform feature is possible, the Digital Assets Lab reference workload should consume Phase 1–4 end to end.
 
-Candidate capabilities:
+Concrete integration work includes:
+
+- mapping DAL workflow operations to generic ARGUS mission/step contracts;
+- supplying DAL worker prompts and structured schemas behind the generic worker boundary;
+- connecting analytics, diagnosis, hypothesis, generation, and QA to ARGUS scheduling/attempt semantics;
+- implementing DAL-owned upload execution and remote reconciliation behind generic Phase 3 effect contracts;
+- supplying DAL-specific guardrail/budget values behind generic Phase 4 policies;
+- proving the real cross-repository learning loop with public execution controls.
+
+This integration remains a DAL responsibility; ARGUS must not absorb YouTube/editorial semantics.
+
+## Phase 5 — Remote Always-On Runtime — NEXT GENERIC PHASE
+
+Goal: move durability away from the operator laptop while preserving Phase 1–4 mission semantics.
+
+Candidate capabilities, added when the reference workload demonstrates the need:
 
 - daemon / service mode;
 - remote CLI transport;
@@ -118,7 +149,7 @@ Candidate capabilities:
 - deployment documentation;
 - backup / restore of runtime state.
 
-Exit criterion: closing the operator laptop does not interrupt long-running missions.
+Exit criterion: closing the operator laptop does not interrupt long-running missions, and service/process recovery preserves the same scheduling, worker, effect, guardrail, and budget invariants already proven locally.
 
 ## Phase 6 — Multi-Workload Maturity
 
