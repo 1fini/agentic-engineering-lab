@@ -12,8 +12,8 @@ Goal: establish the public project, architecture boundary, and first reference w
 - [x] ARGUS codename and runtime role defined.
 - [x] DAL / ARGUS ownership boundary documented.
 - [x] First reference workload documented.
-- [ ] Initial implementation issue created from the current DAL integration need.
-- [ ] Initial technology choices recorded as ADRs.
+- [x] Initial implementation issue created from the current DAL integration need.
+- [x] Initial technology choices recorded as ADRs.
 
 Exit criterion: contributors can explain what belongs in ARGUS and what does not.
 
