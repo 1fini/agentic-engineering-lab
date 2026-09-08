@@ -2,47 +2,37 @@
 
 ## Purpose
 
-ARGUS is the runtime and orchestration layer of Agentic Engineering Lab.
+ARGUS is the runtime and orchestration layer of Agentic Engineering Lab. Its job is to make long-running agent missions durable, inspectable, recoverable, policy-bound, and safe to resume.
 
-Its job is to make long-running agent missions durable, inspectable, recoverable, policy-bound, and safe to resume. It is not a domain application and it must not absorb business logic from its consumers.
+ARGUS is not a domain application. Consumer applications keep their own business rules, APIs, schemas, quality policies, interpretation logic, and external-effect semantics.
 
 ## Architectural boundary
 
 ARGUS owns generic execution concerns:
 
 - mission and step lifecycle;
-- durable state;
-- scheduling and wakeups;
+- durable state and audit history;
+- future eligibility / scheduling;
 - bounded worker execution;
-- structured input/output validation;
-- retry, timeout, and error classification;
+- versioned worker input/output validation;
+- retry, timeout, and failure classification;
+- durable attempt evidence;
 - idempotency and recovery coordination;
-- correlated logs, events, artifacts, and evidence;
-- budgets and policy checks;
-- pause, resume, cancellation, and kill switch.
+- usage/duration accounting;
+- future generic side-effect, budget, and operator-control primitives.
 
-Consumer applications own domain concerns:
-
-- business rules;
-- domain-specific state transitions;
-- domain APIs and semantics;
-- interpretation of domain metrics;
-- generation rules;
-- publication or transaction rules;
-- domain-specific quality and policy checks.
-
-A concrete example:
+Consumers own domain concerns. For the first reference workload:
 
 ```text
 Digital Assets Lab                     ARGUS
 ------------------                     -----
-YouTube metrics                        durable step execution
-Short performance analysis             scheduler / wakeups
-editorial hypothesis                   worker invocation
-video generation semantics             retries / timeouts
-editorial QA                            state persistence
-publication policy                     budgets / kill switch
-YouTube upload reconciliation          generic side-effect protocol support
+YouTube metrics                        durable steps
+Short performance analysis             due_at scheduling
+editorial hypothesis                   bounded workers
+video generation semantics             worker protocol validation
+editorial QA                            retries / timeouts
+publication policy                     attempt journal
+YouTube upload/reconciliation          future generic effect protocol
 ```
 
 ARGUS must never contain concepts such as `Short`, `YouTube`, `retention curve`, `editorial hook`, or `video publication policy`.
@@ -51,230 +41,220 @@ ARGUS must never contain concepts such as `Short`, `YouTube`, `retention curve`,
 
 > The orchestrator is deterministic code. LLMs are bounded workers.
 
-ARGUS owns control flow and durable state transitions. Workers are external computations invoked behind explicit contracts. Prompt text is never the source of truth for mission lifecycle, retries, budgets, or recovery.
+Prompt text is never the source of truth for mission lifecycle, retry policy, timing, recovery, budgets, or operator controls.
 
-## Implemented architecture — Phase 1
-
-Mission #1 implements the first durable local slice.
+## Delivered architecture — Phase 1 + Phase 2
 
 ```text
-versioned JSON mission manifest
-             |
-             v
-+---------------------------+
-| Deterministic runner      |
-| - persisted ordinal order |
-| - explicit worker registry|
-| - no prompt control flow  |
-+-------------+-------------+
-              |
-              v
-+---------------------------+
-| SQLite durable store      |
-| - missions                |
-| - ordered steps           |
-| - terminal results        |
-| - append-only journal     |
-+-------------+-------------+
-              |
-              v
-+---------------------------+
-| CLI / evidence            |
-| run / status / inspect    |
-| compact JSON              |
-+---------------------------+
+versioned mission / opaque consumer payload
+                  |
+                  v
++------------------------------------+
+| SQLite durable state               |
+|------------------------------------|
+| missions / ordered steps           |
+| journal                            |
+| scheduled_steps / schedule_events  |
+| attempts / attempt_events          |
++------------------+-----------------+
+                   |
+         +---------+---------+
+         |                   |
+         v                   v
++----------------+   +-----------------------+
+| Scheduler      |   | Phase2Runtime         |
+| due_at / order |-->| due -> attempt ->     |
+| read-only scan |   | bounded worker ->     |
++----------------+   | classify -> persist   |
+                     +-----------+-----------+
+                                 |
+                                 v
+                     +-----------------------+
+                     | Worker boundary       |
+                     | strict JSON v1        |
+                     | bounded subprocess    |
+                     | OpenCode adapter      |
+                     +-----------------------+
 ```
 
-The Phase 1 runtime uses Python 3.12, standard-library SQLite, direct SQL, `argparse`, and pytest as recorded by ADR-0001.
+### Mission and logical step model
 
-### Current mission model
-
-Phase 1 mission states are intentionally smaller than the long-term target:
+The stable core states remain deliberately small:
 
 ```text
-PENDING -> RUNNING -> COMPLETED
-    |         |
-    +-------> FAILED
+Mission: PENDING -> RUNNING -> COMPLETED | FAILED
+Step:    PENDING -> RUNNING -> SUCCEEDED | FAILED
 ```
 
-`COMPLETED` and `FAILED` are terminal. A mission may complete only after every durable step is `SUCCEEDED`.
+A versioned step envelope contains mission/step identity, ordinal, generic operation, opaque JSON payload, payload version, schema version, and deterministic idempotency key.
 
-Future `WAITING`, `PAUSED`, `BLOCKED`, and `CANCELLED` lifecycle states are not yet persisted as mission states; Phase 1 can instead return a typed runtime block when safe progress is impossible.
+For retryable external-worker execution, the logical step stays `PENDING` while individual attempts are tracked separately. This avoids inventing an unsafe `RUNNING -> PENDING` reset.
 
-### Current step model
+On terminal worker success/failure, Phase 2 preserves the logical Phase 1 transition history atomically at the attempt-completion boundary.
 
-A Phase 1 step envelope v1 contains:
+### Persistence
 
-- `mission_id`;
-- `step_id`;
-- zero-based `ordinal`;
-- generic `operation`;
-- opaque JSON `payload`;
-- `payload_version`;
-- envelope schema version;
-- deterministic idempotency key.
+SQLite is the local durable source of truth.
 
-Step states are:
+Phase 1 tables store mission/step definitions, terminal results, and append-only lifecycle history.
+
+Phase 2 adds independently versioned extensions in the same SQLite state file:
+
+- `scheduled_steps` — one active UTC `due_at` per scheduled logical step;
+- `schedule_events` — schedule/reschedule/clear history;
+- `attempts` — monotonic external invocation attempts;
+- `attempt_events` — attempt lifecycle evidence.
+
+The scheduler extensions do not rewrite Phase 1 envelopes. Malformed or unsupported persisted state fails closed.
+
+### Scheduling
+
+Waiting is currently represented as future eligibility rather than a new mission/step state.
+
+A scheduled step is due only when:
+
+- `due_at <= now`;
+- its logical step is `PENDING`;
+- its mission is non-terminal;
+- all earlier ordered steps have succeeded.
+
+Due scans are read-only. Repeating a scan creates no attempts and performs no worker invocation.
+
+The current model is intentionally single-process. It does not claim distributed lease/claim semantics.
+
+### Worker protocol and adapters
+
+Worker invocation crosses a strict versioned JSON boundary:
 
 ```text
-PENDING -> RUNNING -> SUCCEEDED
-    |         |
-    +-------> FAILED
+WorkerRequest v1
+    -> bounded subprocess / adapter
+        -> WorkerResponse v1
 ```
 
-A terminal result is typed `success` or `failure` and contains opaque JSON output. Consumer payload fields are not interpreted by ARGUS.
+Responses declare one of:
 
-The deterministic idempotency key is derived from canonical JSON of the versioned step definition. It protects identity of a durable step definition; it is not a claim of exactly-once external side effects.
+- `success`;
+- `retryable_failure`;
+- `permanent_failure`.
 
-### Current persistence contract
+Transport adds deterministic classifications such as timeout, process error, output-limit violation, malformed output, and termination uncertainty.
 
-SQLite stores:
+Worker output is untrusted until schema validation succeeds. Markdown wrappers, unknown fields, mismatched request IDs, non-finite JSON numbers, and malformed responses are rejected rather than heuristically repaired.
 
-- storage schema metadata;
-- durable mission state;
-- ordered versioned step envelopes;
-- terminal typed step results;
-- append-only creation/state-transition journal.
+`OpenCodeWorkerAdapter` isolates current `opencode run` syntax from the runtime core. OpenCode is an execution backend, not an orchestration authority.
 
-A state transition and its journal entry commit in the same SQLite transaction. Read-time validation fails closed for unsupported versions, malformed persisted JSON, invalid states, inconsistent terminal results, non-contiguous ordinals, mismatched idempotency keys, or invalid SQLite state.
+### Bounded subprocess execution
 
-See `docs/DURABLE_STATE.md`.
+The transport provides:
 
-### Current execution contract
+- explicit timeout;
+- bounded retained stdout/stderr;
+- process-group termination on POSIX;
+- fail-closed termination uncertainty where descendant termination cannot be established;
+- closed stdin except when the generic JSON subprocess protocol intentionally supplies a request.
 
-The Phase 1 runner:
+A timeout is not automatically equivalent to a safe retry. Retryability is a deterministic runtime policy and termination uncertainty always blocks automatic replay.
 
-1. reads persisted state;
-2. selects the next eligible step deterministically by ordinal;
-3. resolves its operation through an explicit callable registry;
-4. commits `RUNNING` before invoking the worker;
-5. persists a valid success/failure result before advancing;
-6. skips already-succeeded steps;
-7. treats a completed mission rerun as a no-op.
+### Durable attempts and retries
 
-An unregistered operation blocks before the step enters `RUNNING`.
+Every Phase 2 external worker invocation is preceded by a committed attempt:
 
-An explicit deterministic worker failure becomes a durable failed result. An unexpected exception leaves the step `RUNNING` rather than inventing a result. Real `KeyboardInterrupt` / `SystemExit` are not swallowed.
+```text
+scheduled step due
+    -> attempt STARTED committed
+        -> invoke worker
+            -> attempt COMPLETED + classified outcome
+```
 
-See `docs/RUNNER.md`.
+If the runtime dies after `STARTED` but before a trustworthy outcome is committed, restart sees an ambiguous attempt and blocks replay.
 
-### Current restart guarantee
+Retry policy is deterministic and currently supports:
 
-Phase 1 proves two separate crash boundaries with real subprocess termination:
+- maximum attempts;
+- default retry delay;
+- worker-declared retryable failure;
+- optional validated `retry_after_seconds`;
+- configurable process-error retryability;
+- configurable proven-timeout retryability.
 
-**Crash after a terminal step commit:** the committed `SUCCEEDED` record is authoritative. Restart skips that step and executes only later pending steps. The acceptance test verifies an external execution log contains each step exactly once.
+Permanent failure, malformed output, output-limit violations, and termination uncertainty are not blindly retried.
 
-**Crash while a step is `RUNNING`:** ARGUS cannot establish the worker's outcome. Restart blocks and does not blindly replay the step.
+Attempts persist duration, exit code, optional token counts, optional worker-reported cost, retry due time, and bounded diagnostics. Raw payloads/stdout/stderr are not exposed by default inspection.
 
-Therefore the Phase 1 guarantee is:
+### Integrated Phase2Runtime
 
-> durably completed steps are not re-executed after restart.
+`Phase2Runtime` composes scheduling, durable attempts, and bounded workers into the local Phase 2 execution slice.
 
-It is deliberately **not** a guarantee of exactly-once external effects for work left `RUNNING`.
+It adds two cross-cutting guarantees:
 
-See `docs/RECOVERY.md`.
+1. an injected logical `now` is used consistently for eligibility and deterministic retry timing;
+2. if the final logical step is already durably `SUCCEEDED`, mission completion can be safely reconciled after restart without replaying a worker.
 
-### Current operator surface
+The safe mission-completion reconciliation is not external-effect reconciliation; it operates only on already-committed internal state.
 
-The current local control surface is machine-readable:
+### Operator evidence
+
+The CLI exposes machine-readable evidence:
 
 ```bash
 argus run --store .argus/state.db --manifest mission.json --fixture-workers
-argus status --store .argus/state.db <mission-id>
-argus inspect --store .argus/state.db <mission-id>
+argus schedule --store .argus/state.db --due-at <timestamp> <mission> <step>
+argus due --store .argus/state.db --at <timestamp>
+argus status --store .argus/state.db <mission>
+argus inspect --store .argus/state.db <mission>
 ```
 
-The fixture registry exists only for executable Phase 1 tests/examples. A production worker backend is not yet implemented.
+`status` includes due time, attempt count, and latest attempt state/outcome. `inspect` includes lifecycle journal, schedule history, and durable attempt metadata without raw consumer payloads.
 
-## Target worker execution — not implemented yet
+## Restart guarantees
 
-The first production worker backend is expected to integrate with OpenCode and cloud-hosted models while remaining backend-agnostic at the runtime boundary.
+Phase 1 proves that a durably completed logical step is not re-executed after process restart.
 
-A later worker adapter should support at least:
+Phase 2 extends the failure model:
 
-- explicit agent/model configuration;
-- structured input;
-- output schema validation;
-- process/request timeout;
-- process-tree termination;
-- retryable/permanent failure classification;
-- duration and cost/token accounting when available.
+- future `due_at` remains discoverable after restart;
+- a committed `STARTED` attempt with no trustworthy result blocks blind replay;
+- process-tree termination uncertainty blocks blind replay;
+- a retryable completed attempt can schedule a future deterministic retry;
+- a crash after final step commit but before mission completion can be reconciled safely from durable internal state.
 
-Malformed worker output must be a typed failure, never an invitation to infer intent from prose.
+See [Restart and Recovery](RECOVERY.md).
 
-## Target scheduling — not implemented yet
+## Phase 3 target — side-effect safety
 
-Long-running missions need durable future wakeups instead of process-local sleeps.
+Phase 2 deliberately does **not** claim exactly-once external effects.
 
-A later phase will introduce persisted waiting semantics such as `due_at`, a local scheduler loop, and restart discovery of due work. This must build on the existing durable state boundary rather than create a parallel scheduler state store.
-
-## Target side-effect safety — not implemented yet
-
-ARGUS must not blindly retry non-idempotent external operations.
-
-The target protocol is:
+The next generic protocol will be driven by the DAL publication/integration need and is expected to introduce some form of:
 
 ```text
-persist intent
-    -> execute external call
-        -> persist outcome
-            -> verify / reconcile if necessary
+persist external-effect intent
+    -> invoke effect
+        -> persist receipt/outcome
+            -> reconcile ambiguity before any duplicate attempt
 ```
 
-If an external effect may have happened but no local result was committed, a future Phase 3 protocol will represent that ambiguity explicitly and invoke a consumer-owned reconciliation mechanism before permitting another side effect.
+The consumer remains responsible for domain-specific reconciliation logic; ARGUS supplies only the generic durable protocol and execution gates.
 
-Phase 1's fail-closed handling of `RUNNING` after process death is the conservative precursor to this protocol.
+## Later operational controls
 
-## Target observability and controls — not implemented yet
+Future phases may add, only when exercised:
 
-Later phases should extend the persisted audit model with, when available:
+- mission/attempt/spend budgets;
+- pause/resume/cancel;
+- workload/global kill switches;
+- policy versioning and structured audit decisions;
+- always-on remote service mode;
+- backup/restore and health reporting;
+- eventually, concurrency or distributed execution if a real workload requires it.
 
-- attempts;
-- input/output digests;
-- worker/model identity;
-- duration and cost;
-- artifact references;
-- policy decisions;
-- correlation IDs;
-- due times;
-- budget reservations and exhaustion;
-- pause/resume/cancel/kill-switch state.
-
-Budgets and kill switches must be deterministic runtime controls, not instructions that depend on model cooperation.
+Budgets and kill switches must be deterministic runtime controls, never instructions that depend on model cooperation.
 
 ## Human-over-the-loop
 
-ARGUS is designed for systems where humans set policy and supervise missions rather than approve routine steps.
+ARGUS is designed so humans define policy and supervise missions rather than approve every routine step.
 
-Human intervention should be reserved for genuine exceptions such as interactive credentials, unresolved policy ambiguity, exhausted configured budgets, or external effects that cannot be reconciled under current policy.
-
-Phase 1 does not yet implement those operational states, but it establishes the durability and fail-closed semantics they require.
-
-## Deployment direction
-
-Current implementation:
-
-```text
-local machine
-  -> ARGUS single-process runtime
-  -> local SQLite durable state
-  -> explicit Python fixture/callable workers
-```
-
-Later target:
-
-```text
-operator CLI
-    |
-    v
-remote always-on ARGUS runtime
-    |
-    +--> bounded worker backends / OpenCode
-    +--> external systems
-    +--> durable state
-```
-
-The CLI remains a control surface. Mission durability belongs in the runtime/state store, not in an interactive terminal session.
+Human intervention should be reserved for genuine exceptions such as interactive credentials, unresolved policy ambiguity, exhausted budgets, or external effects that cannot be reconciled safely.
 
 ## Architecture rule for future contributions
 
