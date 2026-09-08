@@ -4,7 +4,7 @@ This roadmap is intentionally capability-driven rather than feature-maximalist.
 
 ARGUS should grow only when a real workload demonstrates a generic execution need.
 
-## Phase 0 — Foundation
+## Phase 0 — Foundation — COMPLETE
 
 Goal: establish the public project, architecture boundary, and first reference workload.
 
@@ -17,33 +17,38 @@ Goal: establish the public project, architecture boundary, and first reference w
 
 Exit criterion: contributors can explain what belongs in ARGUS and what does not.
 
-## Phase 1 — Durable Single-Process Runtime
+## Phase 1 — Durable Single-Process Runtime — COMPLETE
+
+Delivered by Mission #1.
 
 Goal: make one long-running mission survive process restarts without repeating completed work.
 
-Candidate capabilities:
+Delivered capabilities:
 
-- durable mission store;
-- durable step journal;
-- transactional state transitions;
-- versioned step contracts;
-- typed step results;
-- basic CLI for run / status / inspect;
-- restart recovery;
-- deterministic idempotency keys;
-- focused failure-injection tests.
+- [x] durable SQLite mission store;
+- [x] durable ordered step journal;
+- [x] transactional state transitions and audit entries;
+- [x] versioned generic step contracts;
+- [x] typed step results;
+- [x] machine-readable CLI for `run`, `status`, and `inspect`;
+- [x] deterministic idempotency keys;
+- [x] restart recovery that skips durably completed steps;
+- [x] fail-closed behavior for work left `RUNNING` after process death;
+- [x] focused subprocess failure-injection tests;
+- [x] generic reference-workload fixture with no consumer business semantics.
 
-Explicitly out of scope:
+Explicitly out of scope and still not implemented:
 
 - distributed execution;
 - multi-node coordination;
 - generic workflow DSL;
 - dynamic agent swarms;
-- web dashboard.
+- web dashboard;
+- automatic replay of ambiguous `RUNNING` work.
 
-Exit criterion: a real consumer can execute a multi-step mission, kill ARGUS mid-run, restart it, and continue without rerunning an already committed step.
+Exit criterion: a real consumer-shaped fixture can execute a multi-step mission, kill ARGUS mid-run, restart it, and continue without rerunning an already committed step. The Phase 1 acceptance suite proves this at real subprocess boundaries.
 
-## Phase 2 — Waiting, Scheduling, and Bounded Workers
+## Phase 2 — Waiting, Scheduling, and Bounded Workers — NEXT
 
 Goal: support missions that alternate between active work and future wakeups.
 
