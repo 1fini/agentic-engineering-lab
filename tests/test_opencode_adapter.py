@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 
 import pytest
 
@@ -32,7 +30,14 @@ def test_opencode_command_requires_explicit_model_and_keeps_payload_out_of_argv(
     assert "--file" in command
     assert str(tmp_path / "request.json") in command
     assert "secret-value" not in " ".join(command)
-    assert command.index("--file") > command.index("ARGUS bounded worker protocol v1.\nRead the attached JSON request file. Execute only the requested bounded operation in the configured project context.\nReturn exactly one JSON object on stdout and no Markdown/code fences. The object must use this schema:\n{\n  \"schema_version\": 1,\n  \"request_id\": \"<same request_id>\",\n  \"outcome\": \"success|retryable_failure|permanent_failure\",\n  \"output\": {},\n  \"message\": null,\n  \"retry_after_seconds\": null,\n  \"usage\": null\n}\nDo not invent a different schema. If the operation cannot be completed safely, use retryable_failure or permanent_failure explicitly.\n")
+    prompt_index = next(index for index, value in enumerate(command) if value.startswith("ARGUS bounded worker protocol v1."))
+    assert command.index("--file") > prompt_index
+
+
+def test_protocol_critical_opencode_flags_cannot_be_overridden() -> None:
+    for arg in ("--format", "--file", "--model", "--thinking"):
+        with pytest.raises(ValueError, match="protocol-critical"):
+            OpenCodeConfig(model="provider/model", extra_args=(arg, "anything"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="fake executable fixture uses a POSIX shebang")
