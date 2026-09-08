@@ -9,6 +9,7 @@ from typing import Any
 
 from argus import __version__
 from argus.attempts import AttemptStore
+from argus.effects import EffectStore
 from argus.fixture_workers import build_fixture_registry
 from argus.manifest import ManifestError, load_manifest
 from argus.model import ArgusStateError, MissionState
@@ -123,6 +124,14 @@ def _status(args: argparse.Namespace) -> int:
             )
             for step in steps
         }
+    with EffectStore(args.store) as effect_store:
+        effects = effect_store.list_for_mission(args.mission_id)
+    effect_summary = {
+        step.envelope.step_id: [
+            effect for effect in effects if effect.intent.step_id == step.envelope.step_id
+        ]
+        for step in steps
+    }
     _emit(
         {
             "schema_version": 1,
@@ -148,6 +157,11 @@ def _status(args: argparse.Namespace) -> int:
                         and attempt_summary[step.envelope.step_id][-1].outcome is not None
                         else None
                     ),
+                    "effect_count": len(effect_summary[step.envelope.step_id]),
+                    "effect_states": [
+                        effect.state.value
+                        for effect in effect_summary[step.envelope.step_id]
+                    ],
                 }
                 for step in steps
             ],
@@ -174,6 +188,9 @@ def _inspect(args: argparse.Namespace) -> int:
                 args.mission_id, step.envelope.step_id
             )
         ]
+    with EffectStore(args.store) as effect_store:
+        effects = effect_store.list_for_mission(args.mission_id)
+        effect_history = effect_store.history(args.mission_id)
     _emit(
         {
             "schema_version": 1,
@@ -233,6 +250,37 @@ def _inspect(args: argparse.Namespace) -> int:
                     "retry_due_at": attempt.retry_due_at,
                 }
                 for attempt in attempts
+            ],
+            "effects": [
+                {
+                    "step_id": effect.intent.step_id,
+                    "effect_id": effect.intent.effect_id,
+                    "operation": effect.intent.operation,
+                    "payload_version": effect.intent.payload_version,
+                    "correlation_key": effect.intent.correlation_key,
+                    "state": effect.state.value,
+                    "receipt_outcome": (
+                        effect.receipt.outcome.value if effect.receipt else None
+                    ),
+                    "receipt_source": (
+                        effect.receipt.source.value if effect.receipt else None
+                    ),
+                    "created_at": effect.created_at,
+                    "updated_at": effect.updated_at,
+                }
+                for effect in effects
+            ],
+            "effect_history": [
+                {
+                    "sequence": event.sequence,
+                    "step_id": event.step_id,
+                    "effect_id": event.effect_id,
+                    "event_type": event.event_type,
+                    "from_state": event.from_state,
+                    "to_state": event.to_state,
+                    "recorded_at": event.recorded_at,
+                }
+                for event in effect_history
             ],
         }
     )
