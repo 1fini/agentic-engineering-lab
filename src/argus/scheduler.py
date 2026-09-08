@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
-from typing import Iterable
 
 from argus.model import ArgusStateError
 
@@ -80,7 +79,10 @@ class DurableScheduler:
         self.close()
 
     def schedule(self, mission_id: str, step_id: str, due_at: str | datetime) -> ScheduledStep:
-        canonical_due = canonical_due_at(due_at)
+        try:
+            canonical_due = canonical_due_at(due_at)
+        except (TypeError, ValueError) as exc:
+            raise ScheduleError(str(exc)) from exc
         step = self._connection.execute(
             "SELECT state FROM steps WHERE mission_id = ? AND step_id = ?",
             (mission_id, step_id),
@@ -157,7 +159,10 @@ class DurableScheduler:
         return [_scheduled_from_row(row) for row in rows]
 
     def due(self, now: str | datetime | None = None) -> list[ScheduledStep]:
-        instant = canonical_due_at(now or datetime.now(timezone.utc))
+        try:
+            instant = canonical_due_at(now or datetime.now(timezone.utc))
+        except (TypeError, ValueError) as exc:
+            raise ScheduleError(str(exc)) from exc
         rows = self._connection.execute(
             """
             SELECT ss.mission_id, ss.step_id, ss.due_at, ss.created_at, ss.updated_at
@@ -322,7 +327,12 @@ def canonical_due_at(value: str | datetime) -> str:
 
 
 def _scheduled_from_row(row: sqlite3.Row) -> ScheduledStep:
-    due_at = canonical_due_at(row["due_at"])
+    try:
+        due_at = canonical_due_at(row["due_at"])
+    except ValueError as exc:
+        raise ScheduleError(
+            f"invalid persisted due_at for {row['mission_id']}/{row['step_id']}"
+        ) from exc
     if due_at != row["due_at"]:
         raise ScheduleError(
             f"non-canonical persisted due_at for {row['mission_id']}/{row['step_id']}"
