@@ -63,6 +63,11 @@ class DurableScheduler:
             self._connection.execute("PRAGMA synchronous = FULL")
             self._connection.execute("PRAGMA journal_mode = WAL")
             self._initialize_or_validate()
+        except ScheduleError:
+            connection = getattr(self, "_connection", None)
+            if connection is not None:
+                connection.close()
+            raise
         except sqlite3.DatabaseError as exc:
             connection = getattr(self, "_connection", None)
             if connection is not None:
