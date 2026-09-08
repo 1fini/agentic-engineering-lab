@@ -14,7 +14,7 @@ Most agent workflows are still short-lived and session-bound:
 human -> prompt -> agent -> result
 ```
 
-That model breaks down when a mission must continue for hours or days, wait for future conditions, call external workers, recover after process death, classify failures, preserve evidence, and continue without repeated human approval.
+That model breaks down when a mission must continue for hours or days, wait for future conditions, call external workers, recover after process death, classify failures, preserve evidence, cross external side-effect boundaries safely, and continue without repeated human approval.
 
 ARGUS targets a different execution model:
 
@@ -30,7 +30,9 @@ ARGUS deterministic control plane
     +--> validate structured outputs
     +--> persist attempts and usage
     +--> retry under explicit policy
-    +--> fail closed on ambiguity
+    +--> persist effect intent before external calls
+    +--> reconcile ambiguous external outcomes before replay
+    +--> fail closed on uncertainty
     |
     v
 mission continues until its contract is satisfied
@@ -43,22 +45,22 @@ mission continues until its contract is satisfied
 3. **Durability before autonomy.** Meaningful state must survive process death and restart.
 4. **Human-over-the-loop, not human-in-the-loop.** Routine reversible work should not need approval.
 5. **No blind retries around ambiguous effects.** Unknown outcomes fail closed until they can be reconciled safely.
-6. **Observability is part of correctness.** State, attempts, timing, outcomes, and evidence must be inspectable.
+6. **Observability is part of correctness.** State, attempts, timing, outcomes, effect lineage, and evidence must be inspectable.
 7. **Build from real workloads, not speculative abstractions.** Generic capabilities are added only when a real consumer demonstrates the need.
 
 ## First reference workload
 
 The first reference workload is the **Autonomous Editorial Learning Loop** from Digital Assets Lab.
 
-Digital Assets Lab owns all domain logic: YouTube, Shorts, editorial policy, performance interpretation, generation semantics, quality checks, and publication rules.
+Digital Assets Lab owns all domain logic: YouTube, Shorts, editorial policy, performance interpretation, generation semantics, quality checks, publication execution, and platform-specific reconciliation.
 
-ARGUS owns only reusable execution primitives: durable steps, scheduling, bounded worker invocation, structured-result validation, retries, timeouts, attempt evidence, recovery, budgets, and operational controls.
+ARGUS owns only reusable execution primitives: durable steps, scheduling, bounded worker invocation, structured-result validation, retries, timeouts, attempt evidence, side-effect safety, recovery, budgets, and operational controls.
 
 See [Architecture](docs/ARCHITECTURE.md) and [Reference Workload](docs/REFERENCE_WORKLOAD.md).
 
-## Current implementation — Phase 2 complete
+## Current implementation — Phase 3 complete
 
-ARGUS now ships a local deterministic single-process runtime with two completed capability phases.
+ARGUS now ships a local deterministic single-process runtime with three completed capability phases.
 
 ### Phase 1 — Durable Single-Process Runtime
 
@@ -79,23 +81,39 @@ Delivered by Mission #1:
 
 Delivered by Mission #10:
 
-- persisted UTC `due_at` scheduling in the same SQLite state file;
-- deterministic due polling with dependency ordering;
+- persisted UTC `due_at` scheduling;
+- deterministic dependency-aware due polling;
 - restart-safe wakeup eligibility;
-- strict versioned `WorkerRequest` / `WorkerResponse` JSON contracts;
-- bounded subprocess transport;
-- process-group timeout termination on POSIX;
-- bounded stdout/stderr retention;
-- OpenCode-compatible `opencode run` adapter isolated from orchestration semantics;
-- strict structured-output validation;
-- explicit success / retryable / permanent / timeout / malformed classifications;
-- durable attempt history before every external worker invocation;
-- deterministic attempt limits and retry delays;
+- strict versioned worker JSON contracts;
+- bounded subprocess transport and POSIX process-tree timeout handling;
+- OpenCode-compatible adapter isolated from orchestration semantics;
+- deterministic retry/permanent/timeout/malformed classifications;
+- durable worker attempt history and attempt limits;
 - duration, exit code, optional token usage, and optional cost accounting;
-- fail-closed behavior for a durable `STARTED` attempt with no known outcome;
-- `Phase2Runtime` composing scheduler + attempts + bounded workers;
-- safe mission-completion reconciliation after a final committed step;
-- real subprocess acceptance covering restart, retry, malformed output, timeout, attempt exhaustion, and ambiguous process death.
+- fail-closed behavior for ambiguous started attempts;
+- integrated Phase 2 runtime with real subprocess acceptance.
+
+### Phase 3 — Side-Effect Safety & Recovery
+
+Delivered by Mission #21:
+
+- versioned durable `EffectIntent` committed before any external call;
+- stable parent effect correlation identity across restart;
+- explicit `INTENT_COMMITTED -> OUTCOME_UNKNOWN -> CONFIRMED_*` lifecycle;
+- durable execution and reconciliation receipts;
+- dedicated effect-attempt history separate from Phase 2 worker attempts;
+- versioned per-attempt identity while preserving the parent effect lineage;
+- generic consumer-owned `EffectExecutor` and `EffectReconciler` boundaries;
+- typed reconciliation decisions: confirmed applied, confirmed not applied, or still unknown;
+- **no blind replay** while an external outcome is ambiguous;
+- deterministic re-attempt only after durable confirmation that the previous effect did not apply;
+- effect replay limits and duplicate-attempt prevention in the local single-process model;
+- machine-readable effect state, receipt source/outcome, attempt lineage, and correlation evidence through `status` / `inspect` without raw consumer payloads;
+- real subprocess crash acceptance using a persistent fake external system separate from ARGUS SQLite.
+
+The Phase 3 acceptance proves crash safety at the important boundaries: after intent/before call, after remote acceptance/before local receipt, repeated unknown reconciliation, confirmed-not-applied re-attempt, and after receipt commit/before lineage synchronization.
+
+ARGUS does **not** claim exactly-once effects for arbitrary remote systems. It guarantees that ambiguity is examined before replay: confirmed applied forbids replay, confirmed not applied may authorize a bounded re-attempt, and unknown remains fail-closed.
 
 Canonical contracts are documented in:
 
@@ -103,14 +121,15 @@ Canonical contracts are documented in:
 - [Runner and CLI](docs/RUNNER.md)
 - [Workers](docs/WORKERS.md)
 - [Attempts](docs/ATTEMPTS.md)
+- [External Effects](docs/EFFECTS.md)
 - [Restart and Recovery](docs/RECOVERY.md)
 - [Architecture](docs/ARCHITECTURE.md)
 
-A generic DAL-shaped reference manifest is available at `examples/reference-workload-v1.json`. ARGUS treats its payload as opaque and contains no YouTube/Short/editorial semantics.
+A generic DAL-shaped reference workload remains domain-opaque. ARGUS contains no YouTube/Short/editorial semantics.
 
 ## Current operator surface
 
-The CLI exposes machine-readable local state and scheduling evidence:
+The CLI exposes machine-readable local state and scheduling/effect evidence:
 
 ```bash
 argus run --store .argus/state.db --manifest mission.json --fixture-workers
@@ -120,31 +139,24 @@ argus schedule --store .argus/state.db --due-at <timestamp> <mission-id> <step-i
 argus due --store .argus/state.db --at <timestamp>
 ```
 
-The production bounded-worker APIs live behind generic Python contracts. OpenCode is one adapter; it is not the orchestration authority.
+The production worker/effect APIs live behind generic Python contracts. OpenCode and consumer-specific remote APIs are adapters; they are not orchestration authorities.
 
-## What Phase 2 does **not** claim
+## Next — Phase 4: Operational Guardrails
 
-Phase 2 does not provide exactly-once external side effects.
-
-If ARGUS has durable evidence that an attempt started but no trustworthy outcome was committed, automatic replay is blocked. Likewise, if process-tree termination cannot be established, the attempt is treated as ambiguous.
-
-Those cases require the next capability phase: explicit side-effect intent, receipt, and reconciliation.
-
-## Next — Phase 3: Side-Effect Safety and Recovery
-
-The next reference-workload need is safe execution of external operations whose outcome can be ambiguous after failure.
+The next reference-workload need is governable unattended execution.
 
 Expected capabilities, only as demonstrated by the DAL integration, include:
 
-- durable side-effect intent;
-- execution receipt contract;
-- explicit unknown-effect state/protocol;
-- generic reconciliation hook;
-- duplicate-effect prevention;
-- correlation and artifact lineage;
-- crash-boundary acceptance tests.
+- mission and attempt budgets;
+- spend/cost budgets when observable;
+- durable reservations where needed to prevent overspend at crash boundaries;
+- pause / resume / cancel controls;
+- workload-level and global kill switches;
+- policy versioning;
+- structured audit decisions for denied or halted execution;
+- acceptance proving that no worker or external effect crosses a paused, cancelled, killed, or exhausted-budget boundary.
 
-Later phases will add operational budgets, pause/resume/cancel/kill-switch controls, and an always-on remote runtime.
+Later phases may add an always-on remote runtime and multi-workload maturity only when real consumers require them.
 
 See the [Roadmap](docs/ROADMAP.md).
 
@@ -180,9 +192,9 @@ See [SECURITY.md](SECURITY.md).
 
 ## Status
 
-**Phase 2 — Durable Scheduling & Bounded Workers: complete.**
+**Phase 3 — Side-Effect Safety & Recovery: complete.**
 
-Mission #1 established durability. Mission #10 adds future wakeups, bounded OpenCode-compatible worker execution, strict worker contracts, durable attempts, retries, timeout handling, and usage evidence. Phase 3 will address ambiguous external side effects rather than weakening the fail-closed guarantees established here.
+Missions #1, #10, and #21 establish durable restart, future scheduling and bounded workers, then external-effect intent/receipt/reconciliation with fail-closed replay semantics. Phase 4 is the next active capability target: deterministic budgets and operator controls for continuous unattended execution.
 
 ## License
 
