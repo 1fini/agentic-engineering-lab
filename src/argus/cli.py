@@ -1,4 +1,4 @@
-"""ARGUS Phase 1 command-line control surface."""
+"""ARGUS command-line control surface."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from argus.fixture_workers import build_fixture_registry
 from argus.manifest import ManifestError, load_manifest
 from argus.model import ArgusStateError, MissionState
 from argus.runner import BlockedMissionError, MissionRunner, WorkerRegistry
+from argus.scheduler import DurableScheduler
 from argus.store import SqliteMissionStore
 
 _EXIT_INPUT = 2
@@ -49,6 +50,21 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--store", required=True, help="path to ARGUS SQLite state")
     inspect_parser.add_argument("mission_id")
 
+    schedule_parser = subparsers.add_parser(
+        "schedule", help="persist future eligibility for a pending step"
+    )
+    schedule_parser.add_argument("--store", required=True, help="path to ARGUS SQLite state")
+    schedule_parser.add_argument("--due-at", required=True, help="timezone-aware ISO-8601 timestamp")
+    schedule_parser.add_argument("mission_id")
+    schedule_parser.add_argument("step_id")
+
+    due_parser = subparsers.add_parser("due", help="list scheduled steps eligible at a time")
+    due_parser.add_argument("--store", required=True, help="path to ARGUS SQLite state")
+    due_parser.add_argument(
+        "--at",
+        help="timezone-aware ISO-8601 timestamp; defaults to current UTC time",
+    )
+
     return parser
 
 
@@ -66,6 +82,10 @@ def main(argv: list[str] | None = None) -> int:
             return _status(args)
         if args.command == "inspect":
             return _inspect(args)
+        if args.command == "schedule":
+            return _schedule(args)
+        if args.command == "due":
+            return _due(args)
         raise AssertionError(f"unhandled command: {args.command}")
     except ManifestError as exc:
         return _emit_error(_EXIT_INPUT, "input_error", exc)
@@ -91,6 +111,10 @@ def _status(args: argparse.Namespace) -> int:
     with SqliteMissionStore(args.store) as store:
         mission = store.load_mission(args.mission_id)
         steps = store.list_steps(args.mission_id)
+    with DurableScheduler(args.store) as scheduler:
+        schedules = {
+            item.step_id: item.due_at for item in scheduler.list_for_mission(args.mission_id)
+        }
     _emit(
         {
             "schema_version": 1,
@@ -103,6 +127,7 @@ def _status(args: argparse.Namespace) -> int:
                     "ordinal": step.envelope.ordinal,
                     "operation": step.envelope.operation,
                     "state": step.state.value,
+                    "due_at": schedules.get(step.envelope.step_id),
                 }
                 for step in steps
             ],
@@ -116,6 +141,11 @@ def _inspect(args: argparse.Namespace) -> int:
         mission = store.load_mission(args.mission_id)
         steps = store.list_steps(args.mission_id)
         journal = store.journal(args.mission_id)
+    with DurableScheduler(args.store) as scheduler:
+        schedules = {
+            item.step_id: item.due_at for item in scheduler.list_for_mission(args.mission_id)
+        }
+        schedule_history = scheduler.history(args.mission_id)
     _emit(
         {
             "schema_version": 1,
@@ -131,6 +161,7 @@ def _inspect(args: argparse.Namespace) -> int:
                     "idempotency_key": step.envelope.idempotency_key,
                     "state": step.state.value,
                     "result_kind": step.result.kind.value if step.result else None,
+                    "due_at": schedules.get(step.envelope.step_id),
                 }
                 for step in steps
             ],
@@ -145,6 +176,52 @@ def _inspect(args: argparse.Namespace) -> int:
                     "recorded_at": entry.recorded_at,
                 }
                 for entry in journal
+            ],
+            "schedule_history": [
+                {
+                    "sequence": entry.sequence,
+                    "step_id": entry.step_id,
+                    "event_type": entry.event_type,
+                    "previous_due_at": entry.previous_due_at,
+                    "due_at": entry.due_at,
+                    "recorded_at": entry.recorded_at,
+                }
+                for entry in schedule_history
+            ],
+        }
+    )
+    return 0
+
+
+def _schedule(args: argparse.Namespace) -> int:
+    with DurableScheduler(args.store) as scheduler:
+        entry = scheduler.schedule(args.mission_id, args.step_id, args.due_at)
+    _emit(
+        {
+            "schema_version": 1,
+            "command": "schedule",
+            "mission_id": entry.mission_id,
+            "step_id": entry.step_id,
+            "due_at": entry.due_at,
+        }
+    )
+    return 0
+
+
+def _due(args: argparse.Namespace) -> int:
+    with DurableScheduler(args.store) as scheduler:
+        entries = scheduler.due(args.at)
+    _emit(
+        {
+            "schema_version": 1,
+            "command": "due",
+            "steps": [
+                {
+                    "mission_id": entry.mission_id,
+                    "step_id": entry.step_id,
+                    "due_at": entry.due_at,
+                }
+                for entry in entries
             ],
         }
     )
