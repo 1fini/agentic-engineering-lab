@@ -12,6 +12,7 @@ from argus.attempts import AttemptStore
 from argus.effect_attempts import EffectAttemptStore
 from argus.effects import EffectStore
 from argus.fixture_workers import build_fixture_registry
+from argus.guardrails import GuardrailPolicy, GuardrailStore
 from argus.manifest import ManifestError, load_manifest
 from argus.model import ArgusStateError, MissionState
 from argus.runner import BlockedMissionError, MissionRunner, WorkerRegistry
@@ -68,6 +69,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="timezone-aware ISO-8601 timestamp; defaults to current UTC time",
     )
 
+    guardrail_parser = subparsers.add_parser(
+        "guardrail-init", help="attach a versioned guardrail policy to a mission"
+    )
+    guardrail_parser.add_argument("--store", required=True, help="path to ARGUS SQLite state")
+    guardrail_parser.add_argument("--workload-scope", required=True)
+    guardrail_parser.add_argument("--policy-version", type=int, default=1)
+    guardrail_parser.add_argument("--policy-ref")
+    guardrail_parser.add_argument("mission_id")
+
+    control_parser = subparsers.add_parser(
+        "control", help="pause, resume, cancel, or audit the execution gate for a mission"
+    )
+    control_parser.add_argument("--store", required=True, help="path to ARGUS SQLite state")
+    control_parser.add_argument("action", choices=("pause", "resume", "cancel", "gate"))
+    control_parser.add_argument("mission_id")
+
+    kill_parser = subparsers.add_parser(
+        "kill-switch", help="enable or disable a durable global/workload kill switch"
+    )
+    kill_parser.add_argument("--store", required=True, help="path to ARGUS SQLite state")
+    scope = kill_parser.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--global-scope", action="store_true")
+    scope.add_argument("--workload-scope")
+    kill_parser.add_argument("action", choices=("on", "off"))
+
     return parser
 
 
@@ -89,8 +115,16 @@ def main(argv: list[str] | None = None) -> int:
             return _schedule(args)
         if args.command == "due":
             return _due(args)
+        if args.command == "guardrail-init":
+            return _guardrail_init(args)
+        if args.command == "control":
+            return _control(args)
+        if args.command == "kill-switch":
+            return _kill_switch(args)
         raise AssertionError(f"unhandled command: {args.command}")
     except ManifestError as exc:
+        return _emit_error(_EXIT_INPUT, "input_error", exc)
+    except ValueError as exc:
         return _emit_error(_EXIT_INPUT, "input_error", exc)
     except BlockedMissionError as exc:
         return _emit_error(_EXIT_BLOCKED, "blocked", exc)
@@ -142,12 +176,31 @@ def _status(args: argparse.Namespace) -> int:
         ]
         for step in steps
     }
+    with GuardrailStore(args.store) as guardrails:
+        guardrail = guardrails.get(args.mission_id)
+        if guardrail is None:
+            guardrail_status = None
+        else:
+            gate = guardrails.check_gate(args.mission_id)
+            guardrail_status = {
+                "workload_scope": guardrail.policy.workload_scope,
+                "policy_version": guardrail.policy.policy_version,
+                "policy_hash": guardrail.policy.policy_hash,
+                "control_state": guardrail.control_state.value,
+                "global_kill": guardrails.global_kill_enabled(),
+                "workload_kill": guardrails.workload_kill_enabled(
+                    guardrail.policy.workload_scope
+                ),
+                "gate_decision": gate.decision.value,
+                "gate_reason": gate.reason.value,
+            }
     _emit(
         {
             "schema_version": 1,
             "command": "status",
             "mission_id": mission.mission_id,
             "state": mission.state.value,
+            "guardrail": guardrail_status,
             "steps": [
                 {
                     "step_id": step.envelope.step_id,
@@ -219,12 +272,42 @@ def _inspect(args: argparse.Namespace) -> int:
                 effect.intent.effect_id,
             )
         ]
+    with GuardrailStore(args.store) as guardrails:
+        guardrail = guardrails.get(args.mission_id)
+        if guardrail is None:
+            guardrail_status = None
+            guardrail_history = []
+        else:
+            gate = guardrails.check_gate(args.mission_id)
+            guardrail_status = {
+                "workload_scope": guardrail.policy.workload_scope,
+                "policy_version": guardrail.policy.policy_version,
+                "policy_hash": guardrail.policy.policy_hash,
+                "control_state": guardrail.control_state.value,
+                "global_kill": guardrails.global_kill_enabled(),
+                "workload_kill": guardrails.workload_kill_enabled(
+                    guardrail.policy.workload_scope
+                ),
+                "gate_decision": gate.decision.value,
+                "gate_reason": gate.reason.value,
+            }
+            guardrail_history = [
+                event
+                for event in guardrails.history()
+                if event.mission_id == args.mission_id
+                or event.event_type.startswith("global_kill_")
+                or (
+                    event.workload_scope == guardrail.policy.workload_scope
+                    and event.event_type.startswith("workload_kill_")
+                )
+            ]
     _emit(
         {
             "schema_version": 1,
             "command": "inspect",
             "mission_id": mission.mission_id,
             "state": mission.state.value,
+            "guardrail": guardrail_status,
             "steps": [
                 {
                     "step_id": step.envelope.step_id,
@@ -332,6 +415,20 @@ def _inspect(args: argparse.Namespace) -> int:
                 }
                 for event in effect_history
             ],
+            "guardrail_history": [
+                {
+                    "sequence": event.sequence,
+                    "mission_id": event.mission_id,
+                    "workload_scope": event.workload_scope,
+                    "event_type": event.event_type,
+                    "decision": event.decision,
+                    "reason": event.reason,
+                    "policy_version": event.policy_version,
+                    "policy_hash": event.policy_hash,
+                    "recorded_at": event.recorded_at,
+                }
+                for event in guardrail_history
+            ],
         }
     )
     return 0
@@ -367,6 +464,85 @@ def _due(args: argparse.Namespace) -> int:
                 }
                 for entry in entries
             ],
+        }
+    )
+    return 0
+
+
+def _guardrail_init(args: argparse.Namespace) -> int:
+    policy = GuardrailPolicy(
+        mission_id=args.mission_id,
+        workload_scope=args.workload_scope,
+        policy_version=args.policy_version,
+        policy_ref=args.policy_ref,
+    )
+    with GuardrailStore(args.store) as guardrails:
+        record = guardrails.set_policy(policy)
+        gate = guardrails.check_gate(args.mission_id)
+    _emit(
+        {
+            "schema_version": 1,
+            "command": "guardrail-init",
+            "mission_id": args.mission_id,
+            "workload_scope": record.policy.workload_scope,
+            "policy_version": record.policy.policy_version,
+            "policy_hash": record.policy.policy_hash,
+            "control_state": record.control_state.value,
+            "gate_decision": gate.decision.value,
+            "gate_reason": gate.reason.value,
+        }
+    )
+    return 0
+
+
+def _control(args: argparse.Namespace) -> int:
+    with GuardrailStore(args.store) as guardrails:
+        if args.action == "pause":
+            record = guardrails.pause(args.mission_id)
+            gate = guardrails.check_gate(args.mission_id)
+        elif args.action == "resume":
+            record = guardrails.resume(args.mission_id)
+            gate = guardrails.check_gate(args.mission_id)
+        elif args.action == "cancel":
+            record = guardrails.cancel(args.mission_id)
+            gate = guardrails.check_gate(args.mission_id)
+        else:
+            gate = guardrails.audit_gate(args.mission_id)
+            record = guardrails.load(args.mission_id)
+    _emit(
+        {
+            "schema_version": 1,
+            "command": "control",
+            "action": args.action,
+            "mission_id": args.mission_id,
+            "control_state": record.control_state.value,
+            "policy_version": record.policy.policy_version,
+            "policy_hash": record.policy.policy_hash,
+            "gate_decision": gate.decision.value,
+            "gate_reason": gate.reason.value,
+        }
+    )
+    return 0
+
+
+def _kill_switch(args: argparse.Namespace) -> int:
+    enabled = args.action == "on"
+    with GuardrailStore(args.store) as guardrails:
+        if args.global_scope:
+            actual = guardrails.set_global_kill(enabled)
+            scope_type = "global"
+            scope_key = None
+        else:
+            actual = guardrails.set_workload_kill(args.workload_scope, enabled)
+            scope_type = "workload"
+            scope_key = args.workload_scope
+    _emit(
+        {
+            "schema_version": 1,
+            "command": "kill-switch",
+            "scope_type": scope_type,
+            "scope_key": scope_key,
+            "enabled": actual,
         }
     )
     return 0
