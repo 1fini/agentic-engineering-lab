@@ -9,6 +9,7 @@ from typing import Any
 
 from argus import __version__
 from argus.attempts import AttemptStore
+from argus.effect_attempts import EffectAttemptStore
 from argus.effects import EffectStore
 from argus.fixture_workers import build_fixture_registry
 from argus.manifest import ManifestError, load_manifest
@@ -126,6 +127,15 @@ def _status(args: argparse.Namespace) -> int:
         }
     with EffectStore(args.store) as effect_store:
         effects = effect_store.list_for_mission(args.mission_id)
+    with EffectAttemptStore(args.store) as effect_attempt_store:
+        effect_attempt_summary = {
+            (effect.intent.step_id, effect.intent.effect_id): effect_attempt_store.list_attempts(
+                args.mission_id,
+                effect.intent.step_id,
+                effect.intent.effect_id,
+            )
+            for effect in effects
+        }
     effect_summary = {
         step.envelope.step_id: [
             effect for effect in effects if effect.intent.step_id == step.envelope.step_id
@@ -162,6 +172,14 @@ def _status(args: argparse.Namespace) -> int:
                         effect.state.value
                         for effect in effect_summary[step.envelope.step_id]
                     ],
+                    "effect_attempt_count": sum(
+                        len(
+                            effect_attempt_summary.get(
+                                (effect.intent.step_id, effect.intent.effect_id), []
+                            )
+                        )
+                        for effect in effect_summary[step.envelope.step_id]
+                    ),
                 }
                 for step in steps
             ],
@@ -191,6 +209,16 @@ def _inspect(args: argparse.Namespace) -> int:
     with EffectStore(args.store) as effect_store:
         effects = effect_store.list_for_mission(args.mission_id)
         effect_history = effect_store.history(args.mission_id)
+    with EffectAttemptStore(args.store) as effect_attempt_store:
+        effect_attempts = [
+            attempt
+            for effect in effects
+            for attempt in effect_attempt_store.list_attempts(
+                args.mission_id,
+                effect.intent.step_id,
+                effect.intent.effect_id,
+            )
+        ]
     _emit(
         {
             "schema_version": 1,
@@ -269,6 +297,28 @@ def _inspect(args: argparse.Namespace) -> int:
                     "updated_at": effect.updated_at,
                 }
                 for effect in effects
+            ],
+            "effect_attempts": [
+                {
+                    "step_id": attempt.step_id,
+                    "effect_id": attempt.effect_id,
+                    "attempt_no": attempt.attempt_no,
+                    "attempt_key": attempt.attempt_key,
+                    "state": attempt.state.value,
+                    "started_at": attempt.started_at,
+                    "resolved_at": attempt.resolved_at,
+                    "receipt_outcome": (
+                        attempt.receipt_outcome.value
+                        if attempt.receipt_outcome is not None
+                        else None
+                    ),
+                    "receipt_source": (
+                        attempt.receipt_source.value
+                        if attempt.receipt_source is not None
+                        else None
+                    ),
+                }
+                for attempt in effect_attempts
             ],
             "effect_history": [
                 {
