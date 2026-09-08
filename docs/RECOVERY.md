@@ -1,6 +1,6 @@
 # ARGUS Restart and Recovery Semantics
 
-ARGUS treats restart behavior as part of correctness. Phase 1 proves durable logical-step recovery, Phase 2 extends that contract across future scheduling and bounded worker attempts, and Phase 3 extends it across ambiguous external side effects.
+ARGUS treats restart behavior as part of correctness. Phase 1 proves durable logical-step recovery, Phase 2 extends that contract across future scheduling and bounded worker attempts, Phase 3 extends it across ambiguous external side effects, and Phase 4 extends it across operator controls and budget boundaries.
 
 ## 1. Committed logical step
 
@@ -96,7 +96,7 @@ blind replay -> FORBIDDEN
 reconciliation -> REQUIRED
 ```
 
-The Phase 3 acceptance suite proves this with a fake remote system persisted in a file separate from ARGUS SQLite and a real `os._exit()` after remote acceptance.
+The Phase 3 acceptance suite proves this with a fake remote system persisted separately from ARGUS SQLite and a real `os._exit()` after remote acceptance.
 
 ## 11. Consumer-owned reconciliation
 
@@ -108,31 +108,7 @@ For an ambiguous effect, ARGUS invokes a typed consumer reconciler. The consumer
 
 ARGUS validates correlation against the durable parent effect and current attempt identity. Platform-specific lookup semantics remain entirely consumer-owned.
 
-### Confirmed applied
-
-ARGUS commits an authoritative reconciliation receipt and advances without another external call.
-
-```text
-OUTCOME_UNKNOWN
-      ↓ reconcile
-CONFIRMED_APPLIED
-      ↓
-replay permanently forbidden
-```
-
-### Confirmed not applied
-
-ARGUS commits a not-applied reconciliation receipt. This is the **only** reconciliation outcome that may authorize a new external effect attempt.
-
-A policy-bounded re-attempt receives a new monotonic attempt identity while preserving the stable parent effect correlation.
-
-### Still unknown
-
-```text
-STILL_UNKNOWN -> BLOCKED
-```
-
-Repeated restarts or reconciliation calls may re-check the remote system, but no new external attempt is allocated while uncertainty remains.
+Confirmed applied advances without another external call. Confirmed not applied is the only state that may authorize a bounded re-attempt. Still unknown remains blocked.
 
 ## 12. Effect-attempt lineage
 
@@ -152,44 +128,169 @@ A confirmed applied effect permanently forbids another attempt. Duplicate pollin
 
 If the authoritative parent receipt is committed but an auxiliary lineage synchronization step is interrupted, restart repairs the lineage from already-committed local evidence. It does **not** execute the external effect again.
 
-The Phase 3 acceptance suite includes this crash boundary.
+## 14. Phase 4: durable operator control survives restart
 
-## 14. What Phase 3 guarantees
+Guardrail state is separate from logical mission state and is durable:
+
+```text
+ACTIVE <-> PAUSED -> CANCELLED
+```
+
+A paused mission remains paused after process restart. New governed execution is denied without allocating a worker/effect attempt. Resume returns the mission to active eligibility without replaying previously completed work.
+
+Cancellation is terminal. Restart cannot implicitly reactivate it.
+
+Workload and global kill switches are also durable. A later interpreter observes the same kill state before any governed attempt allocation.
+
+## 15. Phase 4: denied gates do not mutate execution state
+
+The governed control precedence is deterministic:
+
+```text
+cancelled
+  -> global kill
+  -> workload kill
+  -> paused
+  -> attempt budget
+  -> spend reservation
+  -> execution
+```
+
+If a control or attempt-budget gate denies execution, no new worker attempt, effect attempt, or external call is created.
+
+Read-only polling/checking does not consume attempts or spend.
+
+## 16. Phase 4: attempt budgets survive restart by using authoritative evidence
+
+Worker-attempt consumption is derived from durable Phase 2 `attempts`; effect-attempt consumption is derived from Phase 3 `effect_attempts`.
+
+This means an allocated attempt still counts after a crash, including an ambiguous one. ARGUS does not depend on a separate mutable counter that could drift from the execution journal.
+
+Exhaustion is checked before the next attempt is allocated.
+
+## 17. Phase 4: spend reservation precedes cost-bearing execution
+
+When a spend limit is configured, governed execution requires an explicit reservation upper bound.
+
+```text
+budget capacity available
+      ↓
+RESERVED committed
+      ↓
+worker/effect attempt boundary
+      ↓
+external work
+      ↓
+trusted cost known? ---- yes ---> COMMITTED(actual)
+      |
+      no / ambiguous
+      ↓
+remain RESERVED
+```
+
+Outstanding reservations count against available budget across restart. They are never automatically released merely because the ARGUS process died.
+
+## 18. Crash after reservation, before attempt allocation
+
+This is a Phase 4-specific recovery boundary:
+
+```text
+spend RESERVED
+      ↓
+process dies
+      ↓
+no worker/effect attempt exists yet
+```
+
+The next attempt identity is derived from authoritative attempt evidence. Therefore restart derives the same deterministic reservation key and **reuses the existing reservation idempotently**.
+
+The final Phase 4 acceptance initially exposed a bug here: restart checked fresh remaining spend capacity first, saw its own existing reservation, and denied itself as `spend_exhausted`. The delivered implementation fixes the ordering by asking `reserve_spend()` to resolve the same durable reservation key before any fresh-capacity decision.
+
+The acceptance then proves:
+
+```text
+existing reservation
+      ↓ restart
+same reservation key
+      ↓
+reuse, no second reservation
+      ↓
+allocate attempt once
+      ↓
+execute
+```
+
+## 19. Crash after spend reservation and worker `STARTED`
+
+If ARGUS dies after the reservation and Phase 2 `STARTED` attempt are durable but before a trustworthy worker outcome:
+
+- the reservation remains outstanding;
+- the `STARTED` attempt remains ambiguous;
+- restart checks Phase 2 ambiguity before creating another reservation;
+- worker replay remains blocked;
+- no double reservation occurs.
+
+The Phase 4 acceptance uses a real `os._exit()` inside the worker boundary to prove this behavior.
+
+## 20. Crash after spend reservation and effect remote acceptance
+
+For an effectful operation:
+
+```text
+spend RESERVED
+      ↓
+effect OUTCOME_UNKNOWN
+      ↓
+remote accepts effect
+      ↓
+process dies before local receipt
+```
+
+Restart observes Phase 3 ambiguity **before** it can allocate another reservation or effect attempt. The existing reservation remains outstanding and governed replay is forbidden.
+
+The consumer reconciler may later confirm the effect applied without replay. Spend settlement remains explicit and must be based on trustworthy evidence; ambiguity does not silently free capacity.
+
+## 21. What Phase 4 guarantees
 
 In the current local single-process model, ARGUS guarantees:
 
-- durable effect intent precedes any external call;
-- parent effect identity and attempt lineage survive restart;
-- ambiguity is represented explicitly before the runtime leaves the local transactional boundary;
-- ambiguous external outcomes are never blindly replayed;
-- confirmed applied outcomes advance without duplicate execution;
-- confirmed not-applied outcomes are the only path to a policy-authorized re-attempt;
-- still-unknown outcomes remain fail-closed;
-- effect replay is independent from Phase 2 worker retry classification;
-- duplicate restart/polling does not allocate duplicate active effect attempts;
-- safe internal lineage repair never requires an external replay.
+- pause/resume/cancel state survives restart;
+- cancellation is terminal;
+- workload/global kill switches survive restart;
+- denied control or attempt-budget gates allocate no new attempt and make no external call;
+- worker/effect attempt budgets are based on authoritative durable attempt evidence;
+- spend is reserved before configured cost-bearing governed execution;
+- duplicate/restarted reservation for the same next attempt reuses the same durable identity;
+- an unresolved reservation continues to consume capacity;
+- crash after worker attempt allocation leaves reservation outstanding and Phase 2 ambiguity blocks replay;
+- crash after effect attempt/remote acceptance leaves reservation outstanding and Phase 3 ambiguity blocks replay;
+- policy hashes remain attributable in governed execution evidence;
+- Phase 4 does not weaken any Phase 1–3 recovery guarantee.
 
-ARGUS does **not** claim universal exactly-once external effects. If a remote system cannot expose sufficient evidence to distinguish applied from not applied, the correct state remains blocked/unknown.
+ARGUS still does not claim distributed lease safety or universal remote billing reconciliation. Those are outside the current single-process contract.
 
-## 15. Evidence
+## 22. Evidence
 
 `argus status` and `argus inspect` expose machine-readable recovery evidence including:
 
 - mission and logical step states;
 - lifecycle journal;
 - schedules and worker attempts;
-- effect IDs and stable parent correlation keys;
-- effect lifecycle state;
-- receipt outcome and source;
-- effect-attempt number and attempt key;
-- effect/reconciliation lineage.
+- effect IDs, lifecycle, receipts, and effect-attempt lineage;
+- mission guardrail policy/control state;
+- workload/global kill state;
+- budget policy and attempt consumption;
+- spend reservations and their lifecycle;
+- governed allow/deny decisions with policy provenance.
 
-Raw consumer payloads, receipt evidence, and full worker stdout/stderr are not emitted by default.
+Raw consumer payloads, receipt evidence, secrets, and full worker stdout/stderr are not emitted by default.
 
-## 16. Corruption
+## 23. Corruption
 
-Unsupported schema versions, malformed persisted timestamps/JSON, inconsistent effect state, invalid correlation relationships, and invalid SQLite state fail explicitly rather than being heuristically repaired.
+Unsupported schema versions, malformed persisted timestamps/JSON, inconsistent effect state, invalid correlation relationships, invalid guardrail/budget policy hashes, invalid reservation state, and invalid SQLite state fail explicitly rather than being heuristically repaired.
 
-## Next recovery target — Phase 4
+## Next recovery target — Phase 5
 
-Phase 4 will add durable operator and budget gates around execution. Recovery acceptance must prove that a crash cannot bypass a pause, cancellation, kill switch, or budget reservation/exhaustion boundary.
+Phase 5 will move the runtime into an always-on service environment. Its recovery contract must preserve Phase 1–4 behavior across service/process restarts and deployment operations, including safe runtime configuration, health/liveness, and backup/restore of durable state.
+
+The Digital Assets Lab reference workload should first consume Phase 1–4 end to end so remote deployment is driven by a real continuous mission rather than speculative infrastructure.
