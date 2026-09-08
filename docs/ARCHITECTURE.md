@@ -47,94 +47,172 @@ YouTube upload reconciliation          generic side-effect protocol support
 
 ARGUS must never contain concepts such as `Short`, `YouTube`, `retention curve`, `editorial hook`, or `video publication policy`.
 
-## Control plane vs cognitive workers
-
-The core design rule is simple:
+## Core control-plane rule
 
 > The orchestrator is deterministic code. LLMs are bounded workers.
 
-ARGUS owns control flow and state transitions. Workers are invoked for tasks that require reasoning, interpretation, generation, critique, or synthesis.
+ARGUS owns control flow and durable state transitions. Workers are external computations invoked behind explicit contracts. Prompt text is never the source of truth for mission lifecycle, retries, budgets, or recovery.
 
-A worker invocation must be treated like an external computation:
+## Implemented architecture — Phase 1
 
-1. inputs are versioned and hashed;
-2. execution is bounded by time and budget;
-3. output must satisfy a declared schema;
-4. malformed output is a typed failure;
-5. accepted output is persisted before the mission advances.
+Mission #1 implements the first durable local slice.
 
-## Mission model
+```text
+versioned JSON mission manifest
+             |
+             v
++---------------------------+
+| Deterministic runner      |
+| - persisted ordinal order |
+| - explicit worker registry|
+| - no prompt control flow  |
++-------------+-------------+
+              |
+              v
++---------------------------+
+| SQLite durable store      |
+| - missions                |
+| - ordered steps           |
+| - terminal results        |
+| - append-only journal     |
++-------------+-------------+
+              |
+              v
++---------------------------+
+| CLI / evidence            |
+| run / status / inspect    |
+| compact JSON              |
++---------------------------+
+```
 
-A mission is a durable execution contract.
+The Phase 1 runtime uses Python 3.12, standard-library SQLite, direct SQL, `argparse`, and pytest as recorded by ADR-0001.
 
-A minimal mission record should eventually contain:
+### Current mission model
+
+Phase 1 mission states are intentionally smaller than the long-term target:
+
+```text
+PENDING -> RUNNING -> COMPLETED
+    |         |
+    +-------> FAILED
+```
+
+`COMPLETED` and `FAILED` are terminal. A mission may complete only after every durable step is `SUCCEEDED`.
+
+Future `WAITING`, `PAUSED`, `BLOCKED`, and `CANCELLED` lifecycle states are not yet persisted as mission states; Phase 1 can instead return a typed runtime block when safe progress is impossible.
+
+### Current step model
+
+A Phase 1 step envelope v1 contains:
 
 - `mission_id`;
-- mission type / version;
-- policy version;
-- creation time;
-- current status;
-- current or runnable steps;
-- budget envelope;
-- correlation identifiers;
-- evidence / artifact references;
-- pause or terminal reason.
+- `step_id`;
+- zero-based `ordinal`;
+- generic `operation`;
+- opaque JSON `payload`;
+- `payload_version`;
+- envelope schema version;
+- deterministic idempotency key.
 
-Likely mission statuses:
+Step states are:
 
 ```text
-PENDING
-RUNNING
-WAITING
-PAUSED
-BLOCKED
-FAILED
-COMPLETED
-CANCELLED
+PENDING -> RUNNING -> SUCCEEDED
+    |         |
+    +-------> FAILED
 ```
 
-The exact schema remains implementation-defined until the first vertical slice fixes the requirements.
+A terminal result is typed `success` or `failure` and contains opaque JSON output. Consumer payload fields are not interpreted by ARGUS.
 
-## Step model
+The deterministic idempotency key is derived from canonical JSON of the versioned step definition. It protects identity of a durable step definition; it is not a claim of exactly-once external side effects.
 
-A step is the smallest durable unit of work.
+### Current persistence contract
 
-The intended execution envelope is conceptually:
+SQLite stores:
 
-```yaml
-mission_id: ...
-cycle_id: ...
-step_id: ...
-step_type: ...
-contract_version: ...
-input_digest: ...
-policy_version: ...
-attempt: 1
-deadline: ...
-budget_reservation: ...
-output_schema: ...
+- storage schema metadata;
+- durable mission state;
+- ordered versioned step envelopes;
+- terminal typed step results;
+- append-only creation/state-transition journal.
+
+A state transition and its journal entry commit in the same SQLite transaction. Read-time validation fails closed for unsupported versions, malformed persisted JSON, invalid states, inconsistent terminal results, non-contiguous ordinals, mismatched idempotency keys, or invalid SQLite state.
+
+See `docs/DURABLE_STATE.md`.
+
+### Current execution contract
+
+The Phase 1 runner:
+
+1. reads persisted state;
+2. selects the next eligible step deterministically by ordinal;
+3. resolves its operation through an explicit callable registry;
+4. commits `RUNNING` before invoking the worker;
+5. persists a valid success/failure result before advancing;
+6. skips already-succeeded steps;
+7. treats a completed mission rerun as a no-op.
+
+An unregistered operation blocks before the step enters `RUNNING`.
+
+An explicit deterministic worker failure becomes a durable failed result. An unexpected exception leaves the step `RUNNING` rather than inventing a result. Real `KeyboardInterrupt` / `SystemExit` are not swallowed.
+
+See `docs/RUNNER.md`.
+
+### Current restart guarantee
+
+Phase 1 proves two separate crash boundaries with real subprocess termination:
+
+**Crash after a terminal step commit:** the committed `SUCCEEDED` record is authoritative. Restart skips that step and executes only later pending steps. The acceptance test verifies an external execution log contains each step exactly once.
+
+**Crash while a step is `RUNNING`:** ARGUS cannot establish the worker's outcome. Restart blocks and does not blindly replay the step.
+
+Therefore the Phase 1 guarantee is:
+
+> durably completed steps are not re-executed after restart.
+
+It is deliberately **not** a guarantee of exactly-once external effects for work left `RUNNING`.
+
+See `docs/RECOVERY.md`.
+
+### Current operator surface
+
+The current local control surface is machine-readable:
+
+```bash
+argus run --store .argus/state.db --manifest mission.json --fixture-workers
+argus status --store .argus/state.db <mission-id>
+argus inspect --store .argus/state.db <mission-id>
 ```
 
-A step result should be typed rather than represented by arbitrary prose.
+The fixture registry exists only for executable Phase 1 tests/examples. A production worker backend is not yet implemented.
 
-Candidate result classes:
+## Target worker execution — not implemented yet
 
-```text
-SUCCESS
-WAIT
-RETRYABLE_FAILURE
-PERMANENT_FAILURE
-UNKNOWN_EFFECT
-PAUSED_BY_POLICY
-```
+The first production worker backend is expected to integrate with OpenCode and cloud-hosted models while remaining backend-agnostic at the runtime boundary.
 
-`UNKNOWN_EFFECT` is especially important for operations that may have succeeded remotely even if the local process did not receive or persist confirmation.
+A later worker adapter should support at least:
 
-## Side-effect safety
+- explicit agent/model configuration;
+- structured input;
+- output schema validation;
+- process/request timeout;
+- process-tree termination;
+- retryable/permanent failure classification;
+- duration and cost/token accounting when available.
+
+Malformed worker output must be a typed failure, never an invitation to infer intent from prose.
+
+## Target scheduling — not implemented yet
+
+Long-running missions need durable future wakeups instead of process-local sleeps.
+
+A later phase will introduce persisted waiting semantics such as `due_at`, a local scheduler loop, and restart discovery of due work. This must build on the existing durable state boundary rather than create a parallel scheduler state store.
+
+## Target side-effect safety — not implemented yet
 
 ARGUS must not blindly retry non-idempotent external operations.
 
-For a side-effecting step, the preferred pattern is:
+The target protocol is:
 
 ```text
 persist intent
@@ -143,119 +221,44 @@ persist intent
             -> verify / reconcile if necessary
 ```
 
-If the process crashes after the external system may have accepted the operation but before a durable local receipt exists, the mission enters an ambiguous state. The next execution must reconcile that state before issuing another side effect.
+If an external effect may have happened but no local result was committed, a future Phase 3 protocol will represent that ambiguity explicitly and invoke a consumer-owned reconciliation mechanism before permitting another side effect.
 
-This is a runtime responsibility at the protocol level. The consumer still owns the domain-specific reconciliation mechanism.
+Phase 1's fail-closed handling of `RUNNING` after process death is the conservative precursor to this protocol.
 
-## Scheduling
+## Target observability and controls — not implemented yet
 
-Long-running missions frequently need to wait for external data or a future condition.
+Later phases should extend the persisted audit model with, when available:
 
-ARGUS therefore needs durable `due_at` scheduling rather than an in-memory sleep loop.
-
-A waiting step should be able to persist:
-
-```text
-status = WAITING
-next_due_at = <timestamp>
-reason = <typed reason>
-```
-
-After a process or machine restart, the scheduler must rediscover due work from persistent state.
-
-## Worker execution
-
-The first worker backend is expected to integrate with OpenCode and cloud-hosted models.
-
-The runtime boundary should remain backend-agnostic. A worker adapter should support at least:
-
-- invocation with explicit agent / model configuration;
-- structured input;
-- process or request timeout;
-- output capture;
-- structured-output validation;
-- cost / token / duration accounting when available;
-- process-tree termination on timeout;
-- typed provider or execution failure.
-
-The initial implementation may be local-first. A later remote worker model should not require changing mission semantics.
-
-## Persistence
-
-The first implementation should prefer the simplest durable storage that satisfies recovery requirements.
-
-A local embedded database is acceptable for the initial runtime if it can provide:
-
-- transactional writes;
-- durable mission and step records;
-- uniqueness constraints for idempotency;
-- queryable due work;
-- migration support;
-- crash-safe state transitions.
-
-A distributed database is explicitly not required for the first milestone.
-
-## Observability
-
-Every state transition should be explainable after the fact.
-
-At minimum, ARGUS should eventually record:
-
-- mission ID;
-- step ID;
-- attempt;
-- timestamps;
+- attempts;
 - input/output digests;
-- worker identity / model;
-- result type;
-- error classification;
-- duration;
-- cost when available;
+- worker/model identity;
+- duration and cost;
 - artifact references;
-- policy decision;
-- correlation IDs.
+- policy decisions;
+- correlation IDs;
+- due times;
+- budget reservations and exhaustion;
+- pause/resume/cancel/kill-switch state.
 
-Logs are useful, but structured persisted events are the more important contract.
-
-## Budgets and operational controls
-
-Autonomy must be bounded.
-
-ARGUS should support mission-level or policy-level limits such as:
-
-- maximum wall-clock duration;
-- maximum step attempts;
-- maximum worker cost;
-- maximum model/token consumption when measurable;
-- maximum concurrent work;
-- explicit pause state;
-- global or workload-specific kill switch.
-
-A budget exhaustion is not an invitation for the model to negotiate with itself. It is a deterministic stop or pause condition.
+Budgets and kill switches must be deterministic runtime controls, not instructions that depend on model cooperation.
 
 ## Human-over-the-loop
 
-ARGUS is designed for systems where humans set the policy and observe the mission rather than approve routine steps.
+ARGUS is designed for systems where humans set policy and supervise missions rather than approve routine steps.
 
-A human intervention should be required only when a mission reaches a state that cannot be safely resolved under current policy, for example:
+Human intervention should be reserved for genuine exceptions such as interactive credentials, unresolved policy ambiguity, exhausted configured budgets, or external effects that cannot be reconciled under current policy.
 
-- credentials require interactive consent;
-- a policy boundary is ambiguous;
-- a non-reconcilable external side effect is uncertain;
-- a configured budget has been exhausted;
-- the consumer explicitly requests escalation.
-
-Routine completion, retries, scheduled wakeups, and validated worker outputs should not require human approval.
+Phase 1 does not yet implement those operational states, but it establishes the durability and fail-closed semantics they require.
 
 ## Deployment direction
 
-Initial target:
+Current implementation:
 
 ```text
 local machine
-  -> ARGUS runtime
-  -> local durable state
-  -> OpenCode / cloud model workers
+  -> ARGUS single-process runtime
+  -> local SQLite durable state
+  -> explicit Python fixture/callable workers
 ```
 
 Later target:
@@ -266,12 +269,12 @@ operator CLI
     v
 remote always-on ARGUS runtime
     |
-    +--> worker backends
+    +--> bounded worker backends / OpenCode
     +--> external systems
     +--> durable state
 ```
 
-The CLI should remain a control surface, not the place where mission durability lives.
+The CLI remains a control surface. Mission durability belongs in the runtime/state store, not in an interactive terminal session.
 
 ## Architecture rule for future contributions
 

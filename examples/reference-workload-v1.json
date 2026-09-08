@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "mission_id": "reference-cycle-001",
+  "steps": [
+    {
+      "step_id": "collect-evidence",
+      "operation": "fixture.echo",
+      "payload_version": 1,
+      "payload": {
+        "cycle_id": "cycle-001",
+        "input_digest": "sha256:fixture-input-a",
+        "policy_version": "consumer-policy-v1",
+        "artifact_refs": ["consumer://evidence/source-a"],
+        "opaque_input": {"request": "collect"}
+      }
+    },
+    {
+      "step_id": "produce-decision",
+      "operation": "fixture.echo",
+      "payload_version": 1,
+      "payload": {
+        "cycle_id": "cycle-001",
+        "input_digest": "sha256:fixture-input-b",
+        "policy_version": "consumer-policy-v1",
+        "artifact_refs": ["consumer://evidence/source-a"],
+        "opaque_input": {"request": "decide"}
+      }
+    },
+    {
+      "step_id": "prepare-effect",
+      "operation": "fixture.echo",
+      "payload_version": 1,
+      "payload": {
+        "cycle_id": "cycle-001",
+        "input_digest": "sha256:fixture-input-c",
+        "policy_version": "consumer-policy-v1",
+        "artifact_refs": ["consumer://artifact/candidate"],
+        "opaque_input": {"request": "prepare"}
+      }
+    }
+  ]
+}
