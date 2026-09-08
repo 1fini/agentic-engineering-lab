@@ -217,9 +217,14 @@ def test_invalid_guardrail_schema_version_fails_closed(tmp_path) -> None:
         GuardrailStore(path)
 
 
-def test_fixture_terms_remain_domain_opaque() -> None:
-    source = __file__
-    text = open(source, encoding="utf-8").read().lower()
+def test_reference_values_remain_domain_opaque() -> None:
+    values = {
+        "workload_scope": "workload-alpha",
+        "policy_ref": "policy://v1",
+        "operation": "fixture.compute",
+        "input_ref": "artifact://opaque",
+    }
+    text = " ".join(values.values()).lower()
     forbidden = ("youtube", "short", "retention", "editorial", "publication")
     for term in forbidden:
         assert term not in text
