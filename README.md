@@ -6,7 +6,7 @@ Agentic Engineering Lab is an open engineering project for building durable, obs
 
 ARGUS is the codename of the runtime developed in this repository.
 
-The project is intentionally not an "autonomous agent that does everything." ARGUS is a control plane that coordinates specialized workers, persists execution state, enforces policies and budgets, survives failures, and keeps humans above the loop rather than inside every step.
+The project is intentionally not an "autonomous agent that does everything." ARGUS is a control plane that coordinates specialized workers, persists execution state, enforces execution semantics, survives failures, and keeps humans above the loop rather than inside every step.
 
 ## Why this project exists
 
@@ -56,7 +56,7 @@ mission continues until its contract is satisfied
    Unknown external outcomes must be reconciled before a side effect is attempted again.
 
 6. **Observability is part of correctness.**
-   Every mission should preserve enough evidence to explain what happened, why, with which inputs, outputs, costs, and policies.
+   Every mission should preserve enough evidence to explain what happened, why, with which inputs, outputs, and policies.
 
 7. **Build from real workloads, not speculative abstractions.**
    Generic ARGUS capabilities are added only when exercised by a real consumer.
@@ -81,23 +81,45 @@ ARGUS owns only reusable execution primitives: durable steps, scheduling, worker
 
 See [Architecture](docs/ARCHITECTURE.md) and [Reference Workload](docs/REFERENCE_WORKLOAD.md).
 
-## Target capabilities
+## Current implementation — Phase 1
 
-ARGUS is expected to grow toward:
+ARGUS now has a local deterministic single-process runtime foundation:
 
-- durable mission and step state;
-- resumable execution;
+- Python 3.12 package and `argus` CLI;
+- versioned generic mission/step contracts;
+- SQLite durable mission and ordered step state;
+- transactional state transitions + append-only journal;
+- deterministic idempotency keys;
+- explicit corruption/schema validation;
+- deterministic callable worker registry;
+- versioned JSON mission manifests;
+- machine-readable `run`, `status`, and `inspect` commands;
+- restart behavior that skips durably completed steps;
+- fail-closed handling of a step left `RUNNING` by process death;
+- real subprocess crash/restart tests proving completed steps are not executed twice.
+
+The canonical Phase 1 contracts are documented in:
+
+- [Durable State](docs/DURABLE_STATE.md)
+- [Runner and CLI](docs/RUNNER.md)
+- [Restart and Recovery](docs/RECOVERY.md)
+
+A generic reference manifest is available at `examples/reference-workload-v1.json`.
+
+## Not implemented yet
+
+The following remain roadmap items, not current runtime claims:
+
 - due-at scheduling and wakeups;
-- bounded OpenCode / model worker execution;
-- versioned structured input/output contracts;
-- retry, timeout, and error classification;
-- idempotency and ambiguous-side-effect reconciliation;
-- correlated logs, events, artifacts, and evidence;
-- cost, time, and attempt budgets;
+- OpenCode / model worker integration;
+- retry and timeout classification;
+- ambiguous external side-effect reconciliation;
+- cost/time/attempt budgets;
 - pause / resume / cancel / kill-switch controls;
-- policy-aware execution;
-- local-first operation with a path to remote always-on execution;
-- CLI-based mission supervision.
+- remote always-on service mode;
+- distributed execution.
+
+See the [Roadmap](docs/ROADMAP.md).
 
 ## Non-goals
 
@@ -110,7 +132,9 @@ ARGUS is not intended to become:
 - a system that silently changes product, editorial, security, or safety policy;
 - a reason to move business logic out of the applications that own it.
 
-## Conceptual architecture
+## Target architecture
+
+The long-term direction remains:
 
 ```text
 +---------------------------+
@@ -144,19 +168,21 @@ ARGUS is not intended to become:
 +---------------------------+
 ```
 
-## CLI direction
+Phase 1 intentionally implements only the durable local subset needed to prove restart semantics.
 
-The exact interface is not frozen, but the intended operator experience is along these lines:
+## Current CLI
+
+The current Phase 1 control surface is:
 
 ```bash
-argus mission run <mission>
-argus mission status <mission-id>
-argus mission pause <mission-id>
-argus mission resume <mission-id>
-argus mission inspect <mission-id>
+argus run --store .argus/state.db --manifest mission.json --fixture-workers
+argus status --store .argus/state.db <mission-id>
+argus inspect --store .argus/state.db <mission-id>
 ```
 
-The runtime should eventually be able to run continuously on an always-on host while the CLI acts as a remote control plane.
+`--fixture-workers` enables only explicit generic test/demo workers. It is not an OpenCode or production worker backend.
+
+Future phases will extend the operator surface with scheduling and operational controls without moving durable control flow into prompts.
 
 ## Development strategy
 
@@ -169,7 +195,7 @@ ARGUS follows a vertical-slice approach:
 5. observe failure modes;
 6. generalize only after repeated evidence.
 
-See the [Roadmap](docs/ROADMAP.md).
+See [Development](docs/DEVELOPMENT.md) for the local install/test path.
 
 ## Security
 
@@ -179,9 +205,9 @@ See [SECURITY.md](SECURITY.md).
 
 ## Status
 
-**Early foundation / architecture phase.**
+**Phase 1 — Durable Single-Process Runtime.**
 
-The first implementation milestone is to provide the smallest durable execution slice required by the Digital Assets Lab reference workload.
+Mission #1 establishes the first executable durability slice required by the Digital Assets Lab reference workload. Later ARGUS missions will add scheduling, bounded OpenCode execution, side-effect reconciliation, and operational guardrails only when exercised by the consumer.
 
 ## License
 
