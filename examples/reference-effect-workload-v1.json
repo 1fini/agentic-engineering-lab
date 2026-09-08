@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "mission_id": "reference-effect-cycle-001",
+  "step_id": "apply-effect",
+  "effect": {
+    "effect_id": "effect-001",
+    "operation": "external.apply",
+    "payload_version": 1,
+    "payload": {
+      "cycle_id": "cycle-001",
+      "artifact_ref": "consumer://artifact/candidate",
+      "policy_ref": "consumer://policy/effect-v1",
+      "opaque_input": {
+        "request": "apply"
+      }
+    }
+  },
+  "reconciliation": {
+    "evidence_ref": "consumer://evidence/remote-lookup",
+    "allowed_decisions": [
+      "confirmed_applied",
+      "confirmed_not_applied",
+      "still_unknown"
+    ]
+  }
+}
