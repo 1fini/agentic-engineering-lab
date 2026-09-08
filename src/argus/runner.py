@@ -123,7 +123,7 @@ class MissionRunner:
                 )
                 failed = self.store.transition_mission(mission_id, MissionState.FAILED)
                 return RunSummary(mission_id, failed.state, tuple(executed))
-            except BaseException as exc:
+            except Exception as exc:
                 raise WorkerInterruptedError(
                     f"worker for step {step.envelope.step_id!r} did not return a durable result; "
                     "step remains RUNNING"
