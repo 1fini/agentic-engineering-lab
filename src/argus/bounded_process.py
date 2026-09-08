@@ -5,12 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 import os
-from pathlib import Path
 import signal
 import subprocess
 import tempfile
 import time
-from typing import Mapping, Sequence
+from typing import Mapping
 
 
 class ProcessOutcome(StrEnum):
@@ -62,13 +61,13 @@ class BoundedProcess:
     def __init__(self, config: BoundedProcessConfig) -> None:
         self.config = config
 
-    def run(self) -> ProcessResult:
+    def run(self, stdin_data: bytes | None = None) -> ProcessResult:
         started = time.monotonic()
         with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
             try:
                 process = subprocess.Popen(
                     list(self.config.command),
-                    stdin=subprocess.DEVNULL,
+                    stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
                     stdout=stdout_file,
                     stderr=stderr_file,
                     cwd=self.config.cwd,
@@ -89,7 +88,7 @@ class BoundedProcess:
             timed_out = False
             termination_proven = True
             try:
-                process.wait(timeout=self.config.timeout_seconds)
+                process.communicate(input=stdin_data, timeout=self.config.timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 termination_proven = _terminate_process_tree(
