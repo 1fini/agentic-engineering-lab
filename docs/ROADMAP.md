@@ -61,39 +61,48 @@ Goal: support missions that alternate between future wakeups and bounded externa
 
 Exit criterion: a consumer can persist future work, restart the runtime, wake only at the due boundary, execute a bounded worker, classify failures, retry according to deterministic policy, and inspect durable attempt evidence. Ambiguous executions remain blocked rather than blindly replayed.
 
-## Phase 3 — Side-Effect Safety and Recovery — NEXT
+## Phase 3 — Side-Effect Safety and Recovery — COMPLETE
+
+Delivered by Mission #21.
 
 Goal: safely orchestrate external operations whose outcome may be ambiguous after failure.
 
+- [x] durable versioned external-effect intent before external execution;
+- [x] stable parent effect correlation identity;
+- [x] explicit durable unknown-outcome state;
+- [x] versioned execution/reconciliation receipts;
+- [x] generic consumer-owned executor and reconciler interfaces;
+- [x] typed APPLIED / NOT_APPLIED / UNKNOWN reconciliation decisions;
+- [x] dedicated effect attempts separate from Phase 2 worker attempts;
+- [x] stable per-attempt identity and effect lineage;
+- [x] replay forbidden while the external outcome is unknown;
+- [x] deterministic re-attempt only after confirmed non-application;
+- [x] bounded effect-attempt policy and duplicate-attempt prevention;
+- [x] machine-readable effect/reconciliation lineage without raw consumer payloads;
+- [x] real subprocess crash matrix using a fake external system persisted separately from ARGUS state;
+- [x] generic DAL-shaped effect fixture remains domain-opaque.
+
+Exit criterion: a consumer can prove that crashes before call, after remote acceptance/before local receipt, during reconciliation, and after receipt commit cannot cause an unexamined duplicate effect. Confirmed applied forbids replay; confirmed not applied may authorize a bounded re-attempt; unknown remains fail-closed.
+
+## Phase 4 — Operational Guardrails — NEXT
+
+Goal: make continuous autonomy governable without relying on model cooperation.
+
 Candidate capabilities, added only when exercised by the reference workload:
 
-- durable side-effect intent;
-- execution receipt contract;
-- explicit `UNKNOWN_EFFECT` / reconciliation state or protocol;
-- generic consumer-owned reconciliation hook;
-- duplicate-effect prevention;
-- correlation and artifact lineage;
-- crash-boundary acceptance harness covering intent / call / receipt / reconciliation boundaries.
-
-Exit criterion: a consumer can prove that a crash at each relevant external-effect boundary cannot cause an unexamined duplicate effect.
-
-## Phase 4 — Operational Guardrails
-
-Goal: make continuous autonomy governable.
-
-Candidate capabilities:
-
-- mission budgets;
-- attempt budgets;
-- spend budgets when observable;
+- durable mission execution budget;
+- durable worker/effect attempt budgets;
+- spend/cost budget with explicit reservations when observable;
 - pause / resume;
 - cancellation;
 - workload kill switch;
 - global kill switch;
 - policy versioning;
-- structured audit events.
+- structured audit events for allow/deny/halt decisions;
+- deterministic gates before worker invocation and external-effect execution;
+- crash-boundary acceptance around budget reservation/commit and operator-state transitions.
 
-Exit criterion: operators can bound and stop autonomous execution deterministically without relying on model cooperation.
+Exit criterion: operators can bound, pause, resume, cancel, and stop autonomous execution deterministically, and no worker/effect call can cross a durable paused/cancelled/killed or exhausted-budget boundary.
 
 ## Phase 5 — Remote Always-On Runtime
 
