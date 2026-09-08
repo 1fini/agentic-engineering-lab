@@ -8,6 +8,7 @@ import sys
 from typing import Any
 
 from argus import __version__
+from argus.attempts import AttemptStore
 from argus.fixture_workers import build_fixture_registry
 from argus.manifest import ManifestError, load_manifest
 from argus.model import ArgusStateError, MissionState
@@ -115,6 +116,13 @@ def _status(args: argparse.Namespace) -> int:
         schedules = {
             item.step_id: item.due_at for item in scheduler.list_for_mission(args.mission_id)
         }
+    with AttemptStore(args.store) as attempts:
+        attempt_summary = {
+            step.envelope.step_id: attempts.list_attempts(
+                args.mission_id, step.envelope.step_id
+            )
+            for step in steps
+        }
     _emit(
         {
             "schema_version": 1,
@@ -128,6 +136,18 @@ def _status(args: argparse.Namespace) -> int:
                     "operation": step.envelope.operation,
                     "state": step.state.value,
                     "due_at": schedules.get(step.envelope.step_id),
+                    "attempt_count": len(attempt_summary[step.envelope.step_id]),
+                    "latest_attempt_state": (
+                        attempt_summary[step.envelope.step_id][-1].state.value
+                        if attempt_summary[step.envelope.step_id]
+                        else None
+                    ),
+                    "latest_attempt_outcome": (
+                        attempt_summary[step.envelope.step_id][-1].outcome.value
+                        if attempt_summary[step.envelope.step_id]
+                        and attempt_summary[step.envelope.step_id][-1].outcome is not None
+                        else None
+                    ),
                 }
                 for step in steps
             ],
@@ -146,6 +166,14 @@ def _inspect(args: argparse.Namespace) -> int:
             item.step_id: item.due_at for item in scheduler.list_for_mission(args.mission_id)
         }
         schedule_history = scheduler.history(args.mission_id)
+    with AttemptStore(args.store) as attempt_store:
+        attempts = [
+            attempt
+            for step in steps
+            for attempt in attempt_store.list_attempts(
+                args.mission_id, step.envelope.step_id
+            )
+        ]
     _emit(
         {
             "schema_version": 1,
@@ -187,6 +215,24 @@ def _inspect(args: argparse.Namespace) -> int:
                     "recorded_at": entry.recorded_at,
                 }
                 for entry in schedule_history
+            ],
+            "attempts": [
+                {
+                    "step_id": attempt.step_id,
+                    "attempt_no": attempt.attempt_no,
+                    "request_id": attempt.request_id,
+                    "state": attempt.state.value,
+                    "started_at": attempt.started_at,
+                    "completed_at": attempt.completed_at,
+                    "outcome": attempt.outcome.value if attempt.outcome else None,
+                    "duration_ms": attempt.duration_ms,
+                    "exit_code": attempt.exit_code,
+                    "input_tokens": attempt.input_tokens,
+                    "output_tokens": attempt.output_tokens,
+                    "cost_usd": attempt.cost_usd,
+                    "retry_due_at": attempt.retry_due_at,
+                }
+                for attempt in attempts
             ],
         }
     )
